@@ -1,0 +1,65 @@
+<Publish>
+  <!--
+    Nothing here is used until you publish. Before the first upload:
+      - ModId stays empty for the very first Publish. The publisher prints the id it assigns and
+        does NOT write it back, so paste it in by hand afterwards or the next NewVersion fails.
+      - GameVersion must match your installed build. Read it from the bottom of the main menu.
+      - ShortDescription is rejected above 200 characters, not truncated.
+      - Screenshot entries are commented out until the images exist.
+      - Run the publisher from the CrosswalkWidth project directory: media paths resolve against
+        the working directory.
+  -->
+  <ModId Value="" />
+  <DisplayName Value="Crosswalk Width" />
+  <!-- 148 characters. -->
+  <ShortDescription Value="Make pedestrian crossings as wide as you like, from one slider. More paint on the junction, and room for people to cross side by side." />
+
+  <LongDescription># Crosswalk Width
+
+Crossings in Cities: Skylines II are a thin painted band that a queue of citizens shuffles across in
+single file. This puts a slider on how wide they are.
+
+## What it does
+
+Crossing width becomes a percentage of whatever the crossing was drawn with, so a side street keeps
+a modest crossing and a boulevard keeps a generous one — everything scales together. A floor and a
+ceiling in metres are there for the cases where a proportion is not what you want.
+
+Widening a crossing widens both halves of it at once: the painted zebra covers more of the junction,
+and the strip people walk on gets wider, so a crowd spreads across it instead of filing over.
+
+## How it works
+
+A crossing is not part of the road's cross-section — it is a lane laid across the carriageway, and
+the painted zebra is that lane's mesh. This mod changes the width of that lane on the game's own
+lane prefabs and lets the game lay the crossings. No geometry of its own, no Harmony patches, and
+the road itself never gets wider.
+
+## Applying it
+
+Crossings laid after you change the setting are correct immediately. Ones already standing were laid
+at the old width — reload the save, or press "Apply to existing crossings" to re-lay them in place.
+
+Removing the mod puts every crossing back to the width its asset author chose.
+  </LongDescription>
+
+  <Thumbnail Value="Properties/Thumbnail.png" />
+
+  <!--
+  <Screenshot Value="Properties/Screenshots/01-comparison.jpg" />
+  <Screenshot Value="Properties/Screenshots/02-settings.jpg" />
+  -->
+
+  <Tag Value="Code Mod" />
+
+  <ModVersion Value="1.0.0" />
+  <GameVersion Value="1.6.*" />
+
+  <ChangeLog>1.0.0
+First release. Crossing width as a percentage of the crossing's own, with an optional minimum and
+maximum in metres. Widens the painted band and the walking strip together. Crossings already laid
+can be re-laid from the settings panel.
+  </ChangeLog>
+
+  <ExternalLink Type="github" Url="" />
+</Publish>
