@@ -1,0 +1,101 @@
+// Matched to the other mod buttons in the top-left row: a light blue rounded square with a white
+// glyph. The blue is sampled from those buttons (75, 195, 241) rather than guessed, so the row
+// stays visually even.
+.button {
+  width: 40rem;
+  height: 40rem;
+  margin: 0 2rem;
+  padding: 7rem;
+  border: none;
+  border-radius: 8rem;
+  background-color: rgb(75, 195, 241);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background-color 0.1s ease-out;
+}
+
+.button:hover {
+  background-color: rgb(120, 212, 247);
+}
+
+// Running: darker, so the lit state reads as pressed in rather than merely hovered.
+.active {
+  background-color: rgb(24, 130, 176);
+}
+
+.icon {
+  width: 100%;
+  height: 100%;
+}
+
+.panel {
+  position: absolute;
+  top: 48rem;
+  left: 4rem;
+  width: 250rem;
+  padding: 12rem;
+  border-radius: 8rem;
+  background-color: rgba(12, 20, 26, 0.88);
+  color: #ffffff;
+  font-size: 13rem;
+}
+
+.title {
+  font-size: 14rem;
+  font-weight: bold;
+  margin-bottom: 8rem;
+}
+
+.row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin: 8rem 0;
+}
+
+.value {
+  font-size: 20rem;
+  font-weight: bold;
+}
+
+.step {
+  width: 44rem;
+  height: 28rem;
+  border: none;
+  border-radius: 4rem;
+  background-color: rgba(255, 255, 255, 0.16);
+  color: #ffffff;
+  font-size: 18rem;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.step:hover {
+  background-color: rgb(75, 195, 241);
+  color: rgb(8, 30, 42);
+}
+
+.secondary {
+  width: 100%;
+  height: 28rem;
+  margin-top: 6rem;
+  border: none;
+  border-radius: 4rem;
+  background-color: rgba(255, 255, 255, 0.12);
+  color: #ffffff;
+  font-size: 12rem;
+  cursor: pointer;
+}
+
+.secondary:hover {
+  background-color: rgba(255, 255, 255, 0.26);
+}
+
+.hint {
+  margin-top: 10rem;
+  opacity: 0.7;
+  font-size: 12rem;
+  line-height: 1.4;
+}

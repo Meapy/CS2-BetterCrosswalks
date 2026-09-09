@@ -15,13 +15,14 @@ namespace CrosswalkWidth
     /// is a sensible rule, "every crossing exactly 4m" usually is not.
     /// </summary>
     [FileLocation("ModsSettings/CrosswalkWidth/CrosswalkWidth")]
-    [SettingsUIGroupOrder(GroupWidth, GroupApply)]
-    [SettingsUIShowGroupName(GroupWidth, GroupApply)]
+    [SettingsUIGroupOrder(GroupWidth, GroupTool, GroupApply)]
+    [SettingsUIShowGroupName(GroupWidth, GroupTool, GroupApply)]
     public sealed class CrosswalkWidthSetting : ModSetting
     {
         public const string SectionMain = "Main";
 
         public const string GroupWidth = "Width";
+        public const string GroupTool = "Tool";
         public const string GroupApply = "Apply";
 
         public CrosswalkWidthSetting(IMod mod) : base(mod)
@@ -48,6 +49,41 @@ namespace CrosswalkWidth
         [SettingsUISlider(min = 0f, max = 20f, step = 0.5f, unit = "floatSingleFraction")]
         [SettingsUISection(SectionMain, GroupWidth)]
         public float MaximumWidth { get; set; } = 0f;
+
+        // ---------------------------------------------------------------- per junction
+
+        /// <summary>
+        /// Starts the per-junction tool.
+        ///
+        /// Close the options panel afterwards; the tool is already running. Point at a junction,
+        /// Page Up and Page Down change that junction's crossings, left click puts it back on the
+        /// global width, right click leaves the tool.
+        /// </summary>
+        [SettingsUIButton]
+        [SettingsUISection(SectionMain, GroupTool)]
+        public bool StartCrosswalkTool
+        {
+            set
+            {
+                CrosswalkWidthSystem.RequestActivateTool();
+            }
+        }
+
+        /// <summary>How much one Page Up or Page Down changes a junction.</summary>
+        [SettingsUISlider(min = 5f, max = 100f, step = 5f, unit = "percentage")]
+        [SettingsUISection(SectionMain, GroupTool)]
+        public int ToolStepPercentage { get; set; } = 25;
+
+        /// <summary>Forgets every per-junction width in the city.</summary>
+        [SettingsUIButton]
+        [SettingsUISection(SectionMain, GroupTool)]
+        public bool ClearPerJunctionWidths
+        {
+            set
+            {
+                CrosswalkWidthSystem.RequestClearOverrides();
+            }
+        }
 
         // ---------------------------------------------------------------- apply
 
@@ -85,6 +121,7 @@ namespace CrosswalkWidth
             WidthPercentage = 200;
             MinimumWidth = 0f;
             MaximumWidth = 0f;
+            ToolStepPercentage = 25;
         }
     }
 }

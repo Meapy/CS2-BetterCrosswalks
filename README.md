@@ -13,6 +13,9 @@ people to cross side by side.
 | **Crossing width** | A percentage of the crossing's own width, 25%–400%. 100% is the base game. |
 | **Minimum width** | A floor in metres, applied after the percentage. 0 turns it off. |
 | **Maximum width** | A ceiling in metres, applied after the percentage. 0 turns it off. |
+| **Start the crossing tool** | Point at one junction and change only its crossings. |
+| **Tool step size** | How much one Page Up or Page Down changes the junction under the cursor. |
+| **Clear all per-junction widths** | Forgets every junction set by hand. |
 | **Apply to existing crossings** | Re-lays the whole city's crossings without reloading. |
 | **List crossings in the log** | Writes every crossing lane found, before and after, to the game log. |
 
@@ -40,6 +43,27 @@ So one field covers both halves of what you want: more paint on the ground, and 
 people to walk on. This mod rewrites that field on the crossing lane prefabs and lets the game's
 own lane pipeline do everything else — no geometry of its own, no Harmony patches.
 
+## One junction at a time
+
+Press the crossing button in the row of mod buttons at the top left. Then:
+
+- **click a junction** to select it — each of its crossings is outlined at its actual width,
+- **point at a crossing** to make it live, then **drag out from it** to resize that crossing alone,
+  or use **−** and **+** in the panel,
+- **Same for all N crossings here** to make the junction uniform,
+- **Back to global** to forget that crossing's own width,
+- **right click** to drop the selection, right click again to leave the tool.
+
+Per-junction widths are saved with the city.
+
+The button needs the UI module built as well as the DLL — see [ui/README.md](ui/README.md). Without
+it the tool can still be started from the settings panel, but there is no panel to adjust it with.
+
+Under the hood a junction with its own width gets its crossing lanes pointed at a copy of the lane
+prefab carrying that width, since the global setting works by changing the shared prefab every
+junction uses. [NOTES.md](NOTES.md) has the details, including why it has to run after `LaneSystem`,
+and why the width buttons live in the panel rather than on a keyboard shortcut.
+
 ## Applying it
 
 Crossings laid after you change the setting are correct immediately.
@@ -63,6 +87,10 @@ other `CSII_*` environment variables the project imports.
 ```
 dotnet build CS2-CrosswalkWidth.sln -c Release
 ```
+
+The UI half is built separately with npm — see [ui/README.md](ui/README.md) for first-time setup.
+Both halves deploy into the same folder, and the project overrides the toolchain's `DeployWIP`
+target so that building one does not delete the other.
 
 The toolchain's `DeployWIP` target copies the output into your local mods folder on build, so a
 Release build is enough to try it in game.

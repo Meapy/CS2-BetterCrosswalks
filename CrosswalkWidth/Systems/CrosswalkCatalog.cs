@@ -56,9 +56,33 @@ namespace CrosswalkWidth.Systems
 
         private readonly Dictionary<Entity, LaneBaseline> m_Lanes = new Dictionary<Entity, LaneBaseline>();
 
+        /// <summary>
+        /// Used to read the authored width off the managed prefab rather than out of the ECS
+        /// component.
+        ///
+        /// It matters which one is trusted. NetLaneData.m_Width is a live component that earlier
+        /// versions of this mod wrote to, and a city saved while one of those was running can carry
+        /// the inflated figure. PedestrianLane.m_Width on the managed asset is what the asset
+        /// author set and nothing in the game or in this mod writes to it, so it is the one figure
+        /// that is still true after a session that went wrong.
+        /// </summary>
+        public PrefabSystem PrefabSystem { get; set; }
+
         public int LaneCount => m_Lanes.Count;
 
         public int CrossingPieceCount { get; private set; }
+
+        /// <summary>True if this lane prefab is one the game lays crossings along.</summary>
+        public bool IsCrossingLane(Entity lane)
+        {
+            return m_Lanes.ContainsKey(lane);
+        }
+
+        /// <summary>The width the asset author gave this crossing lane, before any scaling.</summary>
+        public float AuthoredWidth(Entity lane)
+        {
+            return m_Lanes.TryGetValue(lane, out LaneBaseline baseline) ? baseline.m_Width : 0f;
+        }
 
         /// <summary>
         /// Records the crossing lane prefab named by every piece that declares a crossing.
@@ -101,6 +125,17 @@ namespace CrosswalkWidth.Systems
                 return;
             }
 
+            // The lane a road names is often a placeholder, not the lane that gets laid. LaneSystem
+            // resolves it through CheckPrefab, which picks a themed variant out of the placeholder's
+            // PlaceholderObjectElement buffer according to the city's theme — so a North American
+            // city lays "NA Crosswalk Lane 2" where the road declared "Crosswalk Lane 2".
+            //
+            // Matching a laid lane against only the declared prefab therefore finds nothing at all,
+            // which is exactly what the log reported: 58 sub-lanes walked, none recognised, one of
+            // them plainly named NA Crosswalk Lane 2. Every variant is captured with its own
+            // authored width, since the variants are not all drawn the same.
+            CaptureVariants(em, lane, declaredBy);
+
             if (m_Lanes.TryGetValue(lane, out LaneBaseline existing))
             {
                 if (!existing.m_DeclaredBy.Contains(declaredBy))
@@ -114,11 +149,95 @@ namespace CrosswalkWidth.Systems
             LaneBaseline baseline = new LaneBaseline
             {
                 m_Lane = lane,
-                m_Width = em.GetComponentData<NetLaneData>(lane).m_Width
+                m_Width = AuthoredWidthOf(em, lane)
             };
 
             baseline.m_DeclaredBy.Add(declaredBy);
             m_Lanes.Add(lane, baseline);
+        }
+
+        /// <summary>
+        /// The width the asset author gave a lane: the managed PedestrianLane component if it can
+        /// be reached, otherwise whatever the ECS component currently says.
+        /// </summary>
+        private float AuthoredWidthOf(EntityManager em, Entity lane)
+        {
+            if (PrefabSystem != null
+                && PrefabSystem.TryGetPrefab<PrefabBase>(lane, out PrefabBase prefab)
+                && prefab != null
+                && prefab.TryGet(out Game.Prefabs.PedestrianLane pedestrianLane)
+                && pedestrianLane != null
+                && pedestrianLane.m_Width > 0.01f)
+            {
+                return pedestrianLane.m_Width;
+            }
+
+            return em.GetComponentData<NetLaneData>(lane).m_Width;
+        }
+
+        /// <summary>
+        /// Records the themed variants a placeholder lane can resolve to.
+        ///
+        /// One level of nesting is walked, guarded against cycles, because a variant can itself be
+        /// a placeholder in principle.
+        /// </summary>
+        private void CaptureVariants(EntityManager em, Entity lane, Entity declaredBy)
+        {
+            if (!em.HasBuffer<PlaceholderObjectElement>(lane))
+            {
+                return;
+            }
+
+            DynamicBuffer<PlaceholderObjectElement> variants =
+                em.GetBuffer<PlaceholderObjectElement>(lane, true);
+
+            for (int i = 0; i < variants.Length; i++)
+            {
+                Entity variant = variants[i].m_Object;
+
+                if (variant == Entity.Null || variant == lane || m_Lanes.ContainsKey(variant))
+                {
+                    continue;
+                }
+
+                Capture(em, variant, declaredBy);
+            }
+        }
+
+        /// <summary>
+        /// Also records the lane named by every crossing the game has actually built.
+        ///
+        /// NetCrosswalkData on the piece prefabs is what a road *declares*; NetCompositionCrosswalk
+        /// is what a composition ended up with once AddCompositionCrosswalks had merged the spans.
+        /// They are normally the same lane, but only the second is the prefab LaneSystem lays, so a
+        /// road family that substitutes one is only visible here.
+        /// </summary>
+        public void DiscoverFromCompositions(EntityManager em, NativeArray<Entity> compositions)
+        {
+            for (int i = 0; i < compositions.Length; i++)
+            {
+                Entity composition = compositions[i];
+
+                if (!em.HasBuffer<NetCompositionCrosswalk>(composition))
+                {
+                    continue;
+                }
+
+                DynamicBuffer<NetCompositionCrosswalk> crosswalks =
+                    em.GetBuffer<NetCompositionCrosswalk>(composition, true);
+
+                for (int j = 0; j < crosswalks.Length; j++)
+                {
+                    Entity lane = crosswalks[j].m_Lane;
+
+                    Capture(em, lane, composition);
+
+                    if (lane != Entity.Null && em.HasComponent<PedestrianLaneData>(lane))
+                    {
+                        Capture(em, em.GetComponentData<PedestrianLaneData>(lane).m_NotWalkLanePrefab, composition);
+                    }
+                }
+            }
         }
 
         /// <summary>
@@ -152,8 +271,11 @@ namespace CrosswalkWidth.Systems
         /// <summary>
         /// Rewrites every recorded crossing lane to base * factor, clamped.
         ///
-        /// Factor 1 with no clamps restores the authored figures exactly, which is what disabling
-        /// the mod and shutting down both do.
+        /// The mod no longer widens prefabs — width is applied per crossing, on the lane, through
+        /// NodeLane.m_WidthOffset, which is what the game itself does and the only thing the
+        /// renderer honours. This is kept for the one call that still matters: factor 1, which puts
+        /// a shared prefab back to its authored width and so undoes anything an earlier version of
+        /// this mod left baked into a save.
         /// </summary>
         public void Apply(EntityManager em, float factor, float minimumWidth, float maximumWidth)
         {

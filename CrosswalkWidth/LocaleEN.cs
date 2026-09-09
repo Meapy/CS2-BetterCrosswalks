@@ -22,6 +22,7 @@ namespace CrosswalkWidth
                 { m_Setting.GetOptionTabLocaleID(CrosswalkWidthSetting.SectionMain), "Main" },
 
                 { m_Setting.GetOptionGroupLocaleID(CrosswalkWidthSetting.GroupWidth), "Width" },
+                { m_Setting.GetOptionGroupLocaleID(CrosswalkWidthSetting.GroupTool), "One junction at a time" },
                 { m_Setting.GetOptionGroupLocaleID(CrosswalkWidthSetting.GroupApply), "Existing crossings" },
 
                 {
@@ -68,6 +69,40 @@ namespace CrosswalkWidth
                     m_Setting.GetOptionDescLocaleID(nameof(CrosswalkWidthSetting.MaximumWidth)),
                     "Caps the result, so the widest crossings do not swallow a small junction. " +
                     "0 turns it off."
+                },
+
+                {
+                    m_Setting.GetOptionLabelLocaleID(nameof(CrosswalkWidthSetting.StartCrosswalkTool)),
+                    "Start the crossing tool"
+                },
+                {
+                    m_Setting.GetOptionDescLocaleID(nameof(CrosswalkWidthSetting.StartCrosswalkTool)),
+                    "Sets the width of one junction's crossings without touching any other.\n\n" +
+                    "Press this, then close the options panel \u2014 the tool is already running. " +
+                    "Point at a junction to highlight it, then:\n\n" +
+                    "Page Up / Page Down \u2014 widen or narrow that junction's crossings\n" +
+                    "Left click \u2014 put that junction back on the global width\n" +
+                    "Right click \u2014 leave the tool\n\n" +
+                    "Per-junction widths are saved with the city."
+                },
+
+                {
+                    m_Setting.GetOptionLabelLocaleID(nameof(CrosswalkWidthSetting.ToolStepPercentage)),
+                    "Tool step size"
+                },
+                {
+                    m_Setting.GetOptionDescLocaleID(nameof(CrosswalkWidthSetting.ToolStepPercentage)),
+                    "How much one press of Page Up or Page Down changes the junction you are pointing at."
+                },
+
+                {
+                    m_Setting.GetOptionLabelLocaleID(nameof(CrosswalkWidthSetting.ClearPerJunctionWidths)),
+                    "Clear all per-junction widths"
+                },
+                {
+                    m_Setting.GetOptionDescLocaleID(nameof(CrosswalkWidthSetting.ClearPerJunctionWidths)),
+                    "Forgets every junction you have set by hand, so the whole city follows the " +
+                    "global width again."
                 },
 
                 {

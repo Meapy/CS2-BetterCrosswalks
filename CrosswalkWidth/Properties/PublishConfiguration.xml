@@ -52,7 +52,7 @@ Removing the mod puts every crossing back to the width its asset author chose.
 
   <Tag Value="Code Mod" />
 
-  <ModVersion Value="1.0.0" />
+  <ModVersion Value="1.6.0" />
   <GameVersion Value="1.6.*" />
 
   <ChangeLog>1.0.0

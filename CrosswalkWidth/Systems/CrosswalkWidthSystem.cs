@@ -9,34 +9,34 @@ using Unity.Entities;
 namespace CrosswalkWidth.Systems
 {
     /// <summary>
-    /// Applies the configured crossing width to the crossing lane prefabs, and — on request —
-    /// re-lays the crossings of a city that is already built.
+    /// Finds the crossing lane prefabs, keeps them at their authored widths, and tells
+    /// CrosswalkOverrideSystem when the answer may have changed for the whole city.
     ///
-    /// The prefab half is cheap and safe. A lane's width is read when the lane is laid, so writing
-    /// it before anything is laid means every crossing built afterwards is right, with no further
-    /// work. That is what OnGameLoadingComplete does, and why changing the setting and reloading
-    /// always works.
+    /// It used to widen the prefabs themselves. That is where the mod went wrong for several
+    /// versions: a wider prefab does spread the people out, but the painted zebra is scaled by
+    /// NodeLane.m_WidthOffset, which stays at zero when the prefab moves, so the crossing behaved
+    /// wider without ever looking it. Width is now applied per crossing, on the lane, and this
+    /// system's remaining job on the prefab side is the opposite one — putting a width back that an
+    /// older version may have written into a save.
     ///
-    /// The city half is one structural change: nodes and edges already standing hold lanes that
-    /// were laid at the old width, and LaneSystem only revisits a node when something marks it
-    /// updated. So the "apply now" path tags every node and edge and lets the game's own lane
-    /// pipeline lay the crossings again.
-    ///
-    /// Registered first in Modification1 so the tag is in place before the net systems run in the
-    /// Modification phases of the same frame. CleanUpSystem strips it at the end of that frame —
-    /// PrepareCleanUpSystem runs last in MainLoop, after the Modification phases nested inside it —
-    /// so each tagged entity is processed exactly once.
+    /// Registered first in Modification1, before the net systems that run later in the same frame.
     /// </summary>
     public partial class CrosswalkWidthSystem : GameSystemBase
     {
         private static bool s_RefreshRequested;
         private static bool s_DumpRequested;
+        private static bool s_ActivateToolRequested;
+        private static bool s_ClearOverridesRequested;
 
         private CrosswalkCatalog m_Catalog;
         private PrefabSystem m_PrefabSystem;
+        private Game.Tools.ToolSystem m_ToolSystem;
+        private CrosswalkPickerToolSystem m_PickerTool;
+        private CrosswalkOverrideSystem m_OverrideSystem;
 
         private EntityQuery m_CrossingPieceQuery;
         private EntityQuery m_PieceLaneQuery;
+        private EntityQuery m_CompositionCrosswalkQuery;
         private EntityQuery m_NetQuery;
 
         private string m_AppliedSignature;
@@ -53,18 +53,43 @@ namespace CrosswalkWidth.Systems
             s_DumpRequested = true;
         }
 
+        /// <summary>
+        /// Start the per-junction tool. Requested rather than done directly because the settings
+        /// panel runs on the UI thread and switching the active tool is simulation-side work.
+        /// </summary>
+        public static void RequestActivateTool()
+        {
+            s_ActivateToolRequested = true;
+        }
+
+        /// <summary>Forget every per-junction width. Called from the settings button.</summary>
+        public static void RequestClearOverrides()
+        {
+            s_ClearOverridesRequested = true;
+        }
+
         protected override void OnCreate()
         {
             base.OnCreate();
 
             m_Catalog = new CrosswalkCatalog();
+            Mod.Catalog = m_Catalog;
+
             m_PrefabSystem = World.GetOrCreateSystemManaged<PrefabSystem>();
+            m_Catalog.PrefabSystem = m_PrefabSystem;
+            m_ToolSystem = World.GetOrCreateSystemManaged<Game.Tools.ToolSystem>();
+            m_PickerTool = World.GetOrCreateSystemManaged<CrosswalkPickerToolSystem>();
+            m_OverrideSystem = World.GetOrCreateSystemManaged<CrosswalkOverrideSystem>();
 
             // NetPieceCrosswalk puts NetCrosswalkData on the piece prefab entity, so this query is
             // exactly "every piece that declares a pedestrian crossing".
             m_CrossingPieceQuery = GetEntityQuery(ComponentType.ReadOnly<NetCrosswalkData>());
 
             m_PieceLaneQuery = GetEntityQuery(ComponentType.ReadOnly<NetPieceLane>());
+
+            // Compositions carry the crossing lane the game actually lays, which is not always the
+            // one the piece declared.
+            m_CompositionCrosswalkQuery = GetEntityQuery(ComponentType.ReadOnly<NetCompositionCrosswalk>());
 
             m_NetQuery = GetEntityQuery(new EntityQueryDesc
             {
@@ -104,9 +129,24 @@ namespace CrosswalkWidth.Systems
 
             bool settingsChanged = settings.Signature != m_AppliedSignature;
 
-            if (!settingsChanged && !s_RefreshRequested && !s_DumpRequested)
+            if (!settingsChanged && !s_RefreshRequested && !s_DumpRequested
+                && !s_ActivateToolRequested && !s_ClearOverridesRequested)
             {
                 return;
+            }
+
+            if (s_ActivateToolRequested)
+            {
+                s_ActivateToolRequested = false;
+                m_ToolSystem.activeTool = m_PickerTool;
+                Mod.Log.Info($"{Mod.ModName}: per-junction tool active");
+            }
+
+            if (s_ClearOverridesRequested)
+            {
+                s_ClearOverridesRequested = false;
+                int cleared = m_OverrideSystem.ClearAllOverrides();
+                Mod.Log.Info($"{Mod.ModName}: cleared {cleared} per-junction widths");
             }
 
             if (settingsChanged)
@@ -131,10 +171,15 @@ namespace CrosswalkWidth.Systems
 
         protected override void OnDestroy()
         {
-            // NetLaneData is serialized, so a save written after this mod is removed must not carry
-            // a scaled crossing width.
+            // NodeLane and NetLaneData are both serialized, so a save written after this mod is
+            // removed must not carry a crossing width nothing will maintain.
             try
             {
+                if (m_OverrideSystem != null)
+                {
+                    m_OverrideSystem.RestoreAuthoredWidths();
+                }
+
                 if (m_Catalog != null && m_Catalog.LaneCount > 0)
                 {
                     m_Catalog.Restore(EntityManager);
@@ -171,22 +216,20 @@ namespace CrosswalkWidth.Systems
 
             m_AppliedSignature = settings.Signature;
 
-            if (!settings.Enabled)
-            {
-                m_Catalog.Restore(EntityManager);
-                Mod.Log.Info($"{Mod.ModName}: disabled, {m_Catalog.LaneCount} crossing lanes restored");
-                return;
-            }
+            // The prefabs are put back to their authored widths and then left alone. Width is
+            // applied per crossing by CrosswalkOverrideSystem, on the lane rather than the prefab,
+            // because that is the only form of it the renderer scales the paint by. This call is
+            // the repair: a save made while an earlier version was widening the shared prefabs
+            // carries those figures, and would otherwise be scaled a second time.
+            m_Catalog.Restore(EntityManager);
 
-            m_Catalog.Apply(
-                EntityManager,
-                settings.WidthPercentage / 100f,
-                settings.MinimumWidth,
-                settings.MaximumWidth);
+            m_OverrideSystem.RequestFullPass();
 
             Mod.Log.Info(
-                $"{Mod.ModName}: applied {settings.WidthPercentage}% to {m_Catalog.LaneCount} crossing lane prefabs "
-                + $"named by {m_Catalog.CrossingPieceCount} crossing pieces");
+                settings.Enabled
+                    ? $"{Mod.ModName}: {settings.WidthPercentage}% over {m_Catalog.LaneCount} crossing lane "
+                        + $"prefabs named by {m_Catalog.CrossingPieceCount} crossing pieces"
+                    : $"{Mod.ModName}: disabled, {m_Catalog.LaneCount} crossing lanes back to authored width");
         }
 
         private void Discover()
@@ -205,6 +248,20 @@ namespace CrosswalkWidth.Systems
             finally
             {
                 pieces.Dispose();
+            }
+
+            if (!m_CompositionCrosswalkQuery.IsEmptyIgnoreFilter)
+            {
+                NativeArray<Entity> compositions = m_CompositionCrosswalkQuery.ToEntityArray(Allocator.Temp);
+
+                try
+                {
+                    m_Catalog.DiscoverFromCompositions(EntityManager, compositions);
+                }
+                finally
+                {
+                    compositions.Dispose();
+                }
             }
 
             if (m_PieceLaneQuery.IsEmptyIgnoreFilter)
@@ -241,11 +298,13 @@ namespace CrosswalkWidth.Systems
                 return;
             }
 
-            int count = m_NetQuery.CalculateEntityCount();
+            // A width change no longer needs the lanes laid again — the width lives on the lane
+            // that is already there, so the whole job is to visit every crossing once. Re-laying
+            // was the old route and it destroyed and rebuilt every lane at every junction in the
+            // city to change one number on each crossing.
+            m_OverrideSystem.RequestFullPass();
 
-            EntityManager.AddComponent(m_NetQuery, ComponentType.ReadWrite<Updated>());
-
-            Mod.Log.Info($"{Mod.ModName}: re-laid {count} net segments and nodes");
+            Mod.Log.Info($"{Mod.ModName}: re-checking every crossing in the city");
         }
 
         private void Dump()
