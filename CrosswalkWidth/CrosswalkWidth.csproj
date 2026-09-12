@@ -14,7 +14,7 @@
 
     <!-- Logged at startup, so a report names a version. Keep in step with ui/mod.json and
          Properties/PublishConfiguration.xml, which the game and the store read separately. -->
-    <Version>1.0.1</Version>
+    <Version>1.1.0</Version>
   </PropertyGroup>
 
   <ItemGroup>

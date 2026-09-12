@@ -62,6 +62,29 @@ namespace CrosswalkWidth.Systems
         private const float kMinDiagonal = 4f;
 
         /// <summary>
+        /// How nearly two crossings must run the same way to be two halves of one road's mouth:
+        /// about fifteen degrees, which is as much as a junction's geometry twists one mouth against
+        /// the other.
+        /// </summary>
+        private const float kArmParallel = 0.96f;
+
+        /// <summary>
+        /// How nearly the line between two crossings' midpoints must run along the direction they
+        /// cross in, for the second to be carrying on where the first stopped rather than sitting
+        /// beside it on another arm. About twenty-five degrees.
+        /// </summary>
+        private const float kArmCollinear = 0.9f;
+
+        /// <summary>
+        /// The widest gap, in metres, that may sit between two halves of one road's mouth.
+        ///
+        /// A sanity bound rather than a real test — the direction checks do the work. A median wide
+        /// enough to exceed this is a park, and the two carriageways either side of it are better
+        /// treated as separate roads anyway.
+        /// </summary>
+        private const float kMaxMedian = 30f;
+
+        /// <summary>
         /// How far a corner may sit from the path node the diagonal is actually wired to, in metres.
         ///
         /// The corner is the midpoint of two crossing ends, which is what makes the scramble
@@ -120,8 +143,23 @@ namespace CrosswalkWidth.Systems
         /// <summary>Lanes cleared per update, rather than a whole city's worth at once.</summary>
         private const int kMaxClearedPerUpdate = 8;
 
+        /// <summary>
+        /// Path node indices for the lines, kept well clear of everything else at a junction.
+        ///
+        /// The game hands its own secondary lanes indices from zero, three at a time, and this
+        /// mod's crossings take theirs from the block the junction's own crossings live in. Neither
+        /// reaches up here. A line is in no pathfinding structure and in no lane list, so these
+        /// numbers are never read — but two lanes at one junction sharing a path node is the kind of
+        /// thing that is inert right up until it is not.
+        /// </summary>
+        private const int kEdgeLineNodeBase = 40000;
+
+        /// <summary>Lines laid or taken out per update, so a city full of them cannot stall a frame.</summary>
+        private const int kMaxLinesPerUpdate = 12;
+
         private EntityQuery m_ScrambleNodeQuery;
         private EntityQuery m_AddedLaneQuery;
+        private EntityQuery m_EdgeLineQuery;
         private EntityQuery m_ReshapedNodeQuery;
         private EntityQuery m_LegacyLaneQuery;
 
@@ -154,6 +192,9 @@ namespace CrosswalkWidth.Systems
 
         /// <summary>Lanes whose junction has gone, cleared a few per update.</summary>
         private readonly List<Entity> m_Orphans = new List<Entity>();
+
+        /// <summary>Middle crossings that already have their side lines, for one pass.</summary>
+        private readonly HashSet<Entity> m_Lined = new HashSet<Entity>();
 
         /// <summary>Which lane indices are taken at the junction being laid, in the low byte only.</summary>
         private readonly bool[] m_UsedIndices = new bool[256];
@@ -271,6 +312,21 @@ namespace CrosswalkWidth.Systems
                 {
                     ComponentType.ReadOnly<CrosswalkAdded>(),
                     ComponentType.ReadOnly<CrosswalkJunction>()
+                },
+                None = new[]
+                {
+                    ComponentType.ReadOnly<Deleted>()
+                }
+            });
+
+            // The painted lines down the sides of this mod's own crossings. Everywhere else in the
+            // city the game lays those itself; it cannot here, because it finds lanes by walking a
+            // junction's SubLane buffer and these crossings are deliberately not in one.
+            m_EdgeLineQuery = GetEntityQuery(new EntityQueryDesc
+            {
+                All = new[]
+                {
+                    ComponentType.ReadOnly<CrosswalkEdgeLine>()
                 },
                 None = new[]
                 {
@@ -693,6 +749,9 @@ namespace CrosswalkWidth.Systems
             {
                 nodes.Dispose();
             }
+
+            // Last, so a crossing laid a moment ago is bordered on this pass rather than the next.
+            RefreshEdgeLines();
         }
 
         /// <summary>
@@ -917,6 +976,21 @@ namespace CrosswalkWidth.Systems
                 {
                     Entity junction =
                         EntityManager.GetComponentData<CrosswalkJunction>(lanes[i]).m_Junction;
+
+                    // A side line is not a crossing. Counting one would satisfy "this junction still
+                    // has its crossings standing" on the strength of a line whose crossing has gone,
+                    // and hold the rebuild off for as long as the line took to be swept.
+                    if (EntityManager.HasComponent<CrosswalkEdgeLine>(lanes[i]))
+                    {
+                        if (junction == Entity.Null
+                            || !EntityManager.Exists(junction)
+                            || !EntityManager.HasComponent<CrosswalkScramble>(junction))
+                        {
+                            m_Orphans.Add(lanes[i]);
+                        }
+
+                        continue;
+                    }
 
                     if (junction == Entity.Null
                         || !EntityManager.Exists(junction)
@@ -1295,6 +1369,18 @@ namespace CrosswalkWidth.Systems
 
             m_Crossings.Sort(CompareCrossingsByAngle);
 
+            // A road with a median has two crossings across its mouth, not one, and until they are
+            // put back together the corner between them lands on the median. See MergeArms.
+            if (MergeArms())
+            {
+                m_Crossings.Sort(CompareCrossingsByAngle);
+            }
+
+            if (m_Crossings.Count < 4)
+            {
+                return false;
+            }
+
             int count = m_Crossings.Count;
 
             for (int i = 0; i < count; i++)
@@ -1336,6 +1422,182 @@ namespace CrosswalkWidth.Systems
             m_Corners.Sort(CompareByAngle);
 
             return m_Corners.Count >= 4;
+        }
+
+        /// <summary>
+        /// Puts back together the crossings that are two halves of one road's mouth. True if
+        /// anything was joined.
+        ///
+        /// A road with a median is not crossed in one span. `AddCompositionCrosswalks` merges
+        /// crossing spans that are *adjacent* in the composition, and a median piece that declares
+        /// no crossing breaks the run — so a divided road's mouth carries two crossings, one per
+        /// carriageway, with a gap between them.
+        ///
+        /// Everything downstream counts crossings and believes each one is an arm. Eight crossings
+        /// at a four-arm junction become eight corners, and four of those eight sit **on the
+        /// median** rather than at a corner of the junction — so a diagonal runs from a real corner
+        /// to the middle of a road, which is what this was reported as.
+        ///
+        /// The two halves are recognised without measuring anything against the junction, in the
+        /// same spirit as the corner counting they feed:
+        ///
+        /// - they run the same way, because both cross the same road;
+        /// - the line between their midpoints runs *along* that same direction, because one carries
+        ///   on where the other stopped.
+        ///
+        /// The second half is what makes this safe. Two crossings on **opposite** arms of a straight
+        /// road are just as parallel, but the line between their midpoints runs along the road —
+        /// square to the direction they cross in — so it fails the test and they are left alone. The
+        /// same is true of the two crossings either side of a side street at a T junction.
+        ///
+        /// The joined crossing spans the outermost of the four ends, and takes its path nodes from
+        /// them, so a corner built from it lands on a real place in the pedestrian graph exactly as
+        /// before. Everything else is taken from the longer of the two, which is the better pattern
+        /// for a lane laid against it.
+        /// </summary>
+        private bool MergeArms()
+        {
+            bool joinedAny = false;
+
+            // Restarted from the top after each join rather than carried on, because a road with
+            // two medians has three halves and the third has to be offered the one just made.
+            bool joining = true;
+
+            while (joining && m_Crossings.Count > 2)
+            {
+                joining = false;
+
+                for (int i = 0; i < m_Crossings.Count; i++)
+                {
+                    int j = (i + 1) % m_Crossings.Count;
+
+                    if (i == j || !SameArm(m_Crossings[i], m_Crossings[j]))
+                    {
+                        continue;
+                    }
+
+                    m_Crossings[i] = Join(m_Crossings[i], m_Crossings[j]);
+                    m_Crossings.RemoveAt(j);
+
+                    joining = true;
+                    joinedAny = true;
+                    break;
+                }
+            }
+
+            return joinedAny;
+        }
+
+        /// <summary>True if these two crossings are halves of the same road's mouth.</summary>
+        private static bool SameArm(Crossing a, Crossing b)
+        {
+            float3 alongA = a.m_End - a.m_Start;
+            float3 alongB = b.m_End - b.m_Start;
+
+            alongA.y = 0f;
+            alongB.y = 0f;
+
+            if (math.lengthsq(alongA) < 0.01f || math.lengthsq(alongB) < 0.01f)
+            {
+                return false;
+            }
+
+            alongA = math.normalize(alongA);
+            alongB = math.normalize(alongB);
+
+            // Both cross the same road, so they run the same way — give or take the fifteen degrees
+            // a junction's geometry can twist one mouth against the other.
+            if (math.abs(math.dot(alongA, alongB)) < kArmParallel)
+            {
+                return false;
+            }
+
+            float3 between = b.m_Midpoint - a.m_Midpoint;
+            between.y = 0f;
+
+            float gap = math.length(between);
+
+            if (gap < 0.01f)
+            {
+                return false;
+            }
+
+            // Sanity only. With the direction test below, nothing plausible gets this far and is
+            // still the wrong pair; this is here so that something implausible cannot join two
+            // crossings at opposite ends of a very large junction.
+            if (gap > a.m_Length + b.m_Length + kMaxMedian)
+            {
+                return false;
+            }
+
+            // And the second one carries on where the first stopped, rather than sitting beside it.
+            // This is the test that tells one road's two halves from two different roads.
+            return math.abs(math.dot(between / gap, alongA)) >= kArmCollinear;
+        }
+
+        /// <summary>One crossing spanning both halves, from the outermost of their four ends.</summary>
+        private static Crossing Join(Crossing a, Crossing b)
+        {
+            Crossing joined = a.m_Length >= b.m_Length ? a : b;
+
+            float3 along = a.m_End - a.m_Start;
+            along.y = 0f;
+            along = math.normalize(along);
+
+            float3 origin = a.m_Start;
+
+            float3 lowPoint = a.m_Start;
+            float3 highPoint = a.m_Start;
+            PathNode lowNode = a.m_StartNode;
+            PathNode highNode = a.m_StartNode;
+
+            float low = 0f;
+            float high = 0f;
+
+            Consider(along, origin, a.m_End, a.m_EndNode, ref low, ref high, ref lowPoint, ref highPoint, ref lowNode, ref highNode);
+            Consider(along, origin, b.m_Start, b.m_StartNode, ref low, ref high, ref lowPoint, ref highPoint, ref lowNode, ref highNode);
+            Consider(along, origin, b.m_End, b.m_EndNode, ref low, ref high, ref lowPoint, ref highPoint, ref lowNode, ref highNode);
+
+            joined.m_Start = lowPoint;
+            joined.m_End = highPoint;
+            joined.m_StartNode = lowNode;
+            joined.m_EndNode = highNode;
+            joined.m_Length = math.distance(lowPoint, highPoint);
+            joined.m_Midpoint = (lowPoint + highPoint) * 0.5f;
+
+            return joined;
+        }
+
+        /// <summary>Keeps whichever of the ends seen so far lies furthest each way along the road.</summary>
+        private static void Consider(
+            float3 along,
+            float3 origin,
+            float3 point,
+            PathNode node,
+            ref float low,
+            ref float high,
+            ref float3 lowPoint,
+            ref float3 highPoint,
+            ref PathNode lowNode,
+            ref PathNode highNode)
+        {
+            float3 offset = point - origin;
+            offset.y = 0f;
+
+            float distance = math.dot(offset, along);
+
+            if (distance < low)
+            {
+                low = distance;
+                lowPoint = point;
+                lowNode = node;
+            }
+            else if (distance > high)
+            {
+                high = distance;
+                highPoint = point;
+                highNode = node;
+            }
         }
 
         /// <summary>
@@ -1790,6 +2052,285 @@ namespace CrosswalkWidth.Systems
             }
 
             return lane;
+        }
+
+        /// <summary>
+        /// Keeps the painted lines down the sides of this mod's crossings in step with them: lays
+        /// the ones that are missing, moves the ones that are out of place, takes out the ones whose
+        /// crossing has gone or that are no longer wanted.
+        ///
+        /// All three every pass, because unlike the game's own lines these are not laid once and
+        /// forgotten. A middle crossing can be dragged wider or slid along the road at any moment,
+        /// and its lines are worked out from its curve and its width — so recomputing them is both
+        /// the cheapest way to follow it and the only way that cannot drift: every write is absolute,
+        /// from the crossing as it stands now.
+        /// </summary>
+        private void RefreshEdgeLines()
+        {
+            CrosswalkWidthSetting settings = Mod.Settings;
+            bool wanted = settings != null && settings.Enabled && settings.EdgeLines;
+
+            if (!wanted && m_EdgeLineQuery.IsEmptyIgnoreFilter)
+            {
+                return;
+            }
+
+            m_Lined.Clear();
+
+            int done = 0;
+
+            if (!m_EdgeLineQuery.IsEmptyIgnoreFilter)
+            {
+                NativeArray<Entity> lines = m_EdgeLineQuery.ToEntityArray(Allocator.Temp);
+
+                try
+                {
+                    for (int i = 0; i < lines.Length; i++)
+                    {
+                        Entity line = lines[i];
+
+                        if (!EntityManager.Exists(line) || EntityManager.HasComponent<Deleted>(line))
+                        {
+                            continue;
+                        }
+
+                        Entity crossing = EntityManager.GetComponentData<CrosswalkEdgeLine>(line).m_Crossing;
+
+                        bool orphaned = crossing == Entity.Null
+                            || !EntityManager.Exists(crossing)
+                            || EntityManager.HasComponent<Deleted>(crossing)
+                            || !EntityManager.HasComponent<CrosswalkAdded>(crossing);
+
+                        if (!wanted || orphaned)
+                        {
+                            if (done < kMaxLinesPerUpdate)
+                            {
+                                EntityManager.AddComponent<Deleted>(line);
+                                done++;
+                            }
+
+                            continue;
+                        }
+
+                        m_Lined.Add(crossing);
+                        MoveEdgeLine(line, crossing);
+                    }
+                }
+                finally
+                {
+                    lines.Dispose();
+                }
+            }
+
+            if (!wanted || done >= kMaxLinesPerUpdate || m_AddedLaneQuery.IsEmptyIgnoreFilter)
+            {
+                return;
+            }
+
+            // And any crossing standing without them — one laid a moment ago, or every one of them
+            // the first time the setting is switched on.
+            NativeArray<Entity> crossings = m_AddedLaneQuery.ToEntityArray(Allocator.Temp);
+
+            try
+            {
+                for (int i = 0; i < crossings.Length && done < kMaxLinesPerUpdate; i++)
+                {
+                    Entity crossing = crossings[i];
+
+                    if (m_Lined.Contains(crossing)
+                        || EntityManager.HasComponent<CrosswalkEdgeLine>(crossing)
+                        || !EntityManager.Exists(crossing)
+                        || EntityManager.HasComponent<Deleted>(crossing))
+                    {
+                        continue;
+                    }
+
+                    if (CreateEdgeLines(crossing))
+                    {
+                        done += 2;
+                    }
+                }
+            }
+            finally
+            {
+                crossings.Dispose();
+            }
+        }
+
+        /// <summary>
+        /// Lays the two lines down one middle crossing's sides. True if anything was laid.
+        ///
+        /// They are marked like the crossing itself — CrosswalkAdded and CrosswalkJunction, and no
+        /// Owner — so every path that clears a junction's middle crossings clears their lines with
+        /// them, and nothing puts them into a lane list the traffic light initialiser counts through.
+        /// </summary>
+        private bool CreateEdgeLines(Entity crossing)
+        {
+            if (Mod.LineCatalog == null
+                || !EntityManager.HasComponent<PrefabRef>(crossing)
+                || !EntityManager.HasComponent<CrosswalkJunction>(crossing)
+                || !EntityManager.HasComponent<Game.Net.Curve>(crossing))
+            {
+                return false;
+            }
+
+            CrosswalkWidthSetting settings = Mod.Settings;
+
+            Entity marking = Mod.LineCatalog.Choose(
+                EntityManager,
+                EntityManager.GetComponentData<PrefabRef>(crossing).m_Prefab,
+                settings != null ? settings.EdgeLineStyle : null);
+
+            if (marking == Entity.Null
+                || !EntityManager.HasComponent<NetLaneArchetypeData>(marking)
+                || !EntityManager.HasComponent<SecondaryLaneData>(marking))
+            {
+                return false;
+            }
+
+            EntityArchetype archetype =
+                EntityManager.GetComponentData<NetLaneArchetypeData>(marking).m_LaneArchetype;
+
+            if (!archetype.Valid)
+            {
+                return false;
+            }
+
+            CrosswalkJunction belongs = EntityManager.GetComponentData<CrosswalkJunction>(crossing);
+
+            for (int side = -1; side <= 1; side += 2)
+            {
+                Entity line = EntityManager.CreateEntity(archetype);
+
+                EntityManager.SetComponentData(line, new PrefabRef { m_Prefab = marking });
+
+                ushort index = (ushort)(kEdgeLineNodeBase
+                    + math.clamp(belongs.m_Ordinal, 0, 31) * 8
+                    + (side > 0 ? 4 : 0));
+
+                // Secondary path nodes, as the game gives its own markings. They name nothing the
+                // pathfinder walks — a line is in no lane list and carries no path method — so this
+                // is about not colliding with anything rather than about being reachable.
+                EntityManager.SetComponentData(line, new Game.Net.Lane
+                {
+                    m_StartNode = new PathNode(new PathNode(belongs.m_Junction, index), true),
+                    m_MiddleNode = new PathNode(new PathNode(belongs.m_Junction, (ushort)(index + 1)), true),
+                    m_EndNode = new PathNode(new PathNode(belongs.m_Junction, (ushort)(index + 2)), true)
+                });
+
+                EntityManager.AddComponent<CrosswalkAdded>(line);
+
+                EntityManager.AddComponentData(line, new CrosswalkJunction
+                {
+                    m_Version = CrosswalkJunction.kCurrentVersion,
+                    m_Junction = belongs.m_Junction,
+                    m_Ordinal = belongs.m_Ordinal
+                });
+
+                EntityManager.AddComponentData(line, new CrosswalkEdgeLine
+                {
+                    m_Version = CrosswalkEdgeLine.kCurrentVersion,
+                    m_Crossing = crossing,
+                    m_Side = side
+                });
+
+                MoveEdgeLine(line, crossing);
+            }
+
+            return true;
+        }
+
+        /// <summary>
+        /// Puts one line where the crossing it borders now is. True if it had to move.
+        ///
+        /// The offset is the game's own, copied out of <c>SecondaryLaneSystem.CreateSecondaryLane</c>
+        /// so a line beside a middle crossing sits exactly where a line beside any other crossing
+        /// does:
+        ///
+        /// <code>
+        /// curve = NetUtils.OffsetCurveLeftSmooth(laneCurve, laneWidth * -0.5f - cutOffset);
+        /// if (positionOffset.x != cutOffset) { curve = OffsetCurveLeftSmooth(curve, cutOffset - positionOffset.x); }
+        /// </code>
+        ///
+        /// with the width read the way that system reads it — the prefab's, plus whatever this mod
+        /// has written into <c>NodeLane.m_WidthOffset</c>.
+        /// </summary>
+        private bool MoveEdgeLine(Entity line, Entity crossing)
+        {
+            if (!EntityManager.HasComponent<Game.Net.Curve>(line)
+                || !EntityManager.HasComponent<Game.Net.Curve>(crossing)
+                || !EntityManager.HasComponent<PrefabRef>(crossing)
+                || !EntityManager.HasComponent<PrefabRef>(line))
+            {
+                return false;
+            }
+
+            Entity crossingPrefab = EntityManager.GetComponentData<PrefabRef>(crossing).m_Prefab;
+
+            if (!EntityManager.HasComponent<NetLaneData>(crossingPrefab))
+            {
+                return false;
+            }
+
+            float2 width = EntityManager.GetComponentData<NetLaneData>(crossingPrefab).m_Width;
+
+            if (EntityManager.HasComponent<NodeLane>(crossing))
+            {
+                width += EntityManager.GetComponentData<NodeLane>(crossing).m_WidthOffset;
+            }
+
+            Entity marking = EntityManager.GetComponentData<PrefabRef>(line).m_Prefab;
+
+            SecondaryLaneData placement =
+                EntityManager.HasComponent<SecondaryLaneData>(marking)
+                    ? EntityManager.GetComponentData<SecondaryLaneData>(marking)
+                    : default(SecondaryLaneData);
+
+            int side = EntityManager.GetComponentData<CrosswalkEdgeLine>(line).m_Side;
+
+            Bezier4x3 source = EntityManager.GetComponentData<Game.Net.Curve>(crossing).m_Bezier;
+
+            Bezier4x3 moved = Game.Net.NetUtils.OffsetCurveLeftSmooth(
+                source, width * (0.5f * side) - placement.m_CutOffset);
+
+            if (placement.m_PositionOffset.x != placement.m_CutOffset)
+            {
+                moved = Game.Net.NetUtils.OffsetCurveLeftSmooth(
+                    moved, placement.m_CutOffset - placement.m_PositionOffset.x);
+            }
+
+            if (placement.m_PositionOffset.y != 0f)
+            {
+                moved.a.y += placement.m_PositionOffset.y;
+                moved.b.y += placement.m_PositionOffset.y;
+                moved.c.y += placement.m_PositionOffset.y;
+                moved.d.y += placement.m_PositionOffset.y;
+            }
+
+            Game.Net.Curve current = EntityManager.GetComponentData<Game.Net.Curve>(line);
+
+            if (math.distancesq(current.m_Bezier.a, moved.a) < 0.0001f
+                && math.distancesq(current.m_Bezier.d, moved.d) < 0.0001f
+                && math.distancesq(current.m_Bezier.b, moved.b) < 0.0001f)
+            {
+                return false;
+            }
+
+            EntityManager.SetComponentData(line, new Game.Net.Curve
+            {
+                m_Bezier = moved,
+                m_Length = CurveLength(moved)
+            });
+
+            // The mesh is stretched along the curve, so the renderer has to be told to rebuild this
+            // lane's batch. Updated would hand it to the net pipeline instead, which owns none of
+            // this and would sweep it.
+            if (!EntityManager.HasComponent<BatchesUpdated>(line))
+            {
+                EntityManager.AddComponent<BatchesUpdated>(line);
+            }
+
+            return true;
         }
 
         /// <summary>

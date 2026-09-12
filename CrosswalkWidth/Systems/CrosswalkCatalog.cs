@@ -52,6 +52,27 @@ namespace CrosswalkWidth.Systems
             /// where that would show up rather than in a puzzling screenshot.
             /// </summary>
             public bool m_AlsoAPieceLane;
+
+            /// <summary>
+            /// True if some road really declares a crossing along this lane.
+            ///
+            /// Kept apart from <see cref="m_IsNotWalkVariant"/> because a prefab can be both — one
+            /// road family's crossing lane is another's substitute — and being a real crossing
+            /// anywhere is what settles it.
+            /// </summary>
+            public bool m_IsDeclaredCrossing;
+
+            /// <summary>
+            /// True if this lane was only ever reached as <c>PedestrianLaneData.m_NotWalkLanePrefab</c>
+            /// — the lane the game substitutes where a pedestrian lane meets something a citizen may
+            /// not step onto.
+            ///
+            /// It is in this catalogue on purpose: it is laid in the same place a crossing would be
+            /// and has to be sized the same, or a narrow band is left butted against a wide one. But
+            /// it is not a crossing. It paints no stripes, and anything that decorates a crossing
+            /// has to leave it alone — see <see cref="PaintedLanePrefabs"/>.
+            /// </summary>
+            public bool m_IsNotWalkVariant;
         }
 
         private readonly Dictionary<Entity, LaneBaseline> m_Lanes = new Dictionary<Entity, LaneBaseline>();
@@ -81,6 +102,38 @@ namespace CrosswalkWidth.Systems
         public PrefabSystem PrefabSystem { get; set; }
 
         public int LaneCount => m_Lanes.Count;
+
+        /// <summary>
+        /// Every crossing lane prefab found, placeholders and themed variants alike.
+        ///
+        /// Both matter to anything hanging something off a crossing: the placeholder is what a road
+        /// declares and the variant is what actually gets laid, and which of them a given city uses
+        /// is not knowable here.
+        /// </summary>
+        public IEnumerable<Entity> LanePrefabs => m_Lanes.Keys;
+
+        /// <summary>
+        /// The crossing lane prefabs that really paint a crossing — everything in
+        /// <see cref="LanePrefabs"/> except the "may not walk here" substitutes.
+        ///
+        /// For anything that decorates a crossing rather than resizing one. The substitute is laid
+        /// where a pedestrian lane meets something a citizen may not step onto — a carriageway with
+        /// no pavement beside it, which is what a bridge or an elevated road usually is — and it
+        /// paints no stripes. Bordering it draws two lines across a road with nothing between them.
+        /// </summary>
+        public IEnumerable<Entity> PaintedLanePrefabs
+        {
+            get
+            {
+                foreach (KeyValuePair<Entity, LaneBaseline> entry in m_Lanes)
+                {
+                    if (entry.Value.m_IsDeclaredCrossing || !entry.Value.m_IsNotWalkVariant)
+                    {
+                        yield return entry.Key;
+                    }
+                }
+            }
+        }
 
         public int CrossingPieceCount { get; private set; }
 
@@ -135,7 +188,7 @@ namespace CrosswalkWidth.Systems
 
                 Entity lane = em.GetComponentData<NetCrosswalkData>(piece).m_Lane;
 
-                Capture(em, lane, piece);
+                Capture(em, lane, piece, notWalk: false);
 
                 // Some connections swap the walkable crossing lane for a "not walk" variant —
                 // PedestrianLaneData.m_NotWalkLanePrefab, used where a crossing meets something a
@@ -143,12 +196,21 @@ namespace CrosswalkWidth.Systems
                 // authored width would show a narrow band butted against a wide one.
                 if (lane != Entity.Null && em.HasComponent<PedestrianLaneData>(lane))
                 {
-                    Capture(em, em.GetComponentData<PedestrianLaneData>(lane).m_NotWalkLanePrefab, piece);
+                    Capture(
+                        em,
+                        em.GetComponentData<PedestrianLaneData>(lane).m_NotWalkLanePrefab,
+                        piece,
+                        notWalk: true);
                 }
             }
         }
 
-        private void Capture(EntityManager em, Entity lane, Entity declaredBy)
+        /// <summary>
+        /// <paramref name="notWalk"/> marks a lane reached as another lane's "may not walk here"
+        /// substitute. It is catalogued like any other, because it has to be sized like one, but it
+        /// paints no crossing — see <see cref="LaneBaseline.m_IsNotWalkVariant"/>.
+        /// </summary>
+        private void Capture(EntityManager em, Entity lane, Entity declaredBy, bool notWalk)
         {
             if (lane == Entity.Null || !em.Exists(lane) || !em.HasComponent<NetLaneData>(lane))
             {
@@ -164,7 +226,7 @@ namespace CrosswalkWidth.Systems
             // which is exactly what the log reported: 58 sub-lanes walked, none recognised, one of
             // them plainly named NA Crosswalk Lane 2. Every variant is captured with its own
             // authored width, since the variants are not all drawn the same.
-            CaptureVariants(em, lane, declaredBy);
+            CaptureVariants(em, lane, declaredBy, notWalk);
 
             if (m_Lanes.TryGetValue(lane, out LaneBaseline existing))
             {
@@ -173,13 +235,20 @@ namespace CrosswalkWidth.Systems
                     existing.m_DeclaredBy.Add(declaredBy);
                 }
 
+                // A prefab can be reached both ways — one road family's crossing lane is another's
+                // substitute — and being a real crossing anywhere settles it.
+                existing.m_IsDeclaredCrossing |= !notWalk;
+                existing.m_IsNotWalkVariant |= notWalk;
+
                 return;
             }
 
             LaneBaseline baseline = new LaneBaseline
             {
                 m_Lane = lane,
-                m_Width = AuthoredWidthOf(em, lane)
+                m_Width = AuthoredWidthOf(em, lane),
+                m_IsDeclaredCrossing = !notWalk,
+                m_IsNotWalkVariant = notWalk
             };
 
             baseline.m_DeclaredBy.Add(declaredBy);
@@ -211,7 +280,7 @@ namespace CrosswalkWidth.Systems
         /// One level of nesting is walked, guarded against cycles, because a variant can itself be
         /// a placeholder in principle.
         /// </summary>
-        private void CaptureVariants(EntityManager em, Entity lane, Entity declaredBy)
+        private void CaptureVariants(EntityManager em, Entity lane, Entity declaredBy, bool notWalk)
         {
             if (!em.HasBuffer<PlaceholderObjectElement>(lane))
             {
@@ -240,7 +309,8 @@ namespace CrosswalkWidth.Systems
                     continue;
                 }
 
-                Capture(em, variant, declaredBy);
+                // A variant of a substitute is a substitute; a variant of a crossing is a crossing.
+                Capture(em, variant, declaredBy, notWalk);
             }
         }
 
@@ -270,11 +340,15 @@ namespace CrosswalkWidth.Systems
                 {
                     Entity lane = crosswalks[j].m_Lane;
 
-                    Capture(em, lane, composition);
+                    Capture(em, lane, composition, notWalk: false);
 
                     if (lane != Entity.Null && em.HasComponent<PedestrianLaneData>(lane))
                     {
-                        Capture(em, em.GetComponentData<PedestrianLaneData>(lane).m_NotWalkLanePrefab, composition);
+                        Capture(
+                            em,
+                            em.GetComponentData<PedestrianLaneData>(lane).m_NotWalkLanePrefab,
+                            composition,
+                            notWalk: true);
                     }
                 }
             }
@@ -367,7 +441,10 @@ namespace CrosswalkWidth.Systems
                 float ratio = baseline.m_Width > 0.001f ? current / baseline.m_Width : 1f;
 
                 yield return $"  {nameOf(baseline.m_Lane)}: {baseline.m_Width:0.00}m -> {current:0.00}m (x{ratio:0.00})"
-                    + (baseline.m_AlsoAPieceLane ? "  [also used as an ordinary lane]" : string.Empty);
+                    + (baseline.m_AlsoAPieceLane ? "  [also used as an ordinary lane]" : string.Empty)
+                    + (baseline.m_IsNotWalkVariant && !baseline.m_IsDeclaredCrossing
+                        ? "  [may-not-walk substitute: sized, never bordered]"
+                        : string.Empty);
 
                 for (int i = 0; i < baseline.m_DeclaredBy.Count && i < 6; i++)
                 {

@@ -1,7 +1,7 @@
 # Better Crosswalks
 
 A Cities: Skylines II code mod for pedestrian crossings: make them wider, shape them one at a time,
-and add crossings corner to corner through the middle of a junction.
+give them a painted border, and add crossings corner to corner through the middle of a junction.
 
 Crossings in Cities: Skylines II are a thin painted band that a queue of citizens shuffles across in
 single file. This widens the band and the strip people walk on together, so a crowd spreads out
@@ -33,6 +33,22 @@ saved with the city.
 **Crossings through the middle.** Junctions where four or more roads meet can take crossings corner
 to corner through the middle — a scramble crossing, the kind Shibuya is known for. On by default,
 and the tool edits and removes them like any other crossing.
+
+**Lines down the sides.** A solid line either side of the zebra stripes, so the crossing reads as a
+bordered band rather than a row of loose bars. The lines sit on the edge of the band and follow it,
+so a crossing you widen takes its borders with it. Off out of the box, since it changes how every
+crossing in the city looks.
+
+They are the game's own road markings, laid by the game's own marking system, so they match whatever
+the city's roads are painted with — a **Line style** dropdown picks between the ones found if the
+automatic choice is not the one you want. They appear only where the game paints a zebra: never on
+the unmarked crossings it lays at every junction, and never on the lane it substitutes where there is
+no pavement to step onto. Crossings through the middle get them too, laid by the mod rather than the
+game, and theirs follow the moment you resize one.
+
+Because the game lays the rest with the junction and saves them with the city, a junction keeps the
+lines it was built with until something rebuilds it — *Apply to existing crossings and lines* is what
+brings a city you already have up to date.
 
 ## How it works
 
@@ -75,6 +91,27 @@ the same paint, width rules and green phase. They deliberately carry **no `Owner
 [NOTES.md](NOTES.md) for why that one detail is the difference between working and taking the game
 down.
 
+The lines down a crossing's sides draw nothing of the mod's either. The game already lays painted
+markings beside lanes, entirely from prefab data: a marking prefab carries `SecondaryLaneData` saying
+how it is placed, and every lane prefab that wants one beside it carries a `SecondaryNetLane` buffer
+naming it. For a lane with nothing alongside, `SecondaryLaneSystem` lays it at
+
+```
+NetUtils.OffsetCurveLeftSmooth(laneCurve, laneWidth * -0.5f - cutOffset)
+```
+
+and reads `laneWidth` as the same `m_Width + m_WidthOffset` pair above. So the whole feature is one
+buffer entry written onto each crossing lane prefab: the lines land on the edge of the band, follow
+it as it is widened, and are created and destroyed with their junction by the game. Prefab entities
+are excluded from a city save, so the entry reaches no save; the lanes laid from it are ordinary
+markings like every other.
+
+The entry carries `Left | Right | OneSided | RequireSafe` — both sides, only where the crossing has
+no lane beside it, and only where the crossing is one the game actually paints. Crossings through the
+middle are the exception again: `SecondaryLaneSystem` finds lanes by walking each junction's lane
+list and those are deliberately not in one, so the mod lays their lines itself, at the same offset,
+recomputed every pass.
+
 ## Applying it
 
 Change the setting and the whole city follows on the next frame — crossings already standing
@@ -85,8 +122,13 @@ one. Width lives on lanes that are already laid, so applying it is a sweep that 
 per crossing; it does **not** hand nodes back to `LaneSystem` to be laid again. The old route did,
 and it destroyed and rebuilt every lane at every junction in the city to change one number on each.
 
-*Apply to existing crossings* therefore does nothing in normal use. It re-requests that sweep, which
-is worth having if a city ever ends up in a state where a crossing was missed.
+The lines are the exception, and the reason *Apply to existing crossings and lines* exists. Those are
+laid by the game when a junction is built and are **saved with the city**, so a junction keeps the
+lines it was built with until something rebuilds it — which is why a change to where the lines belong
+appears to do nothing on a city that already has them, while a junction you happen to edit comes out
+right. The button hands every road back to the pipeline when the lines are on, which re-lays them
+against the prefab as it now stands. It is on a button and never on load, deliberately: a whole city
+re-laid without being asked for is the sort of automatic tidying that once made a save unopenable.
 
 ## Removing it
 
