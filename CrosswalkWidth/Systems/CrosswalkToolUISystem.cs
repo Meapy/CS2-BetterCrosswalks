@@ -29,6 +29,9 @@ namespace CrosswalkWidth.Systems
         private ValueBinding<int> m_GlobalPercent;
         private ValueBinding<int> m_CrossingNumber;
         private ValueBinding<int> m_CrossingCount;
+        private ValueBinding<bool> m_CanScramble;
+        private ValueBinding<bool> m_HasScramble;
+        private ValueBinding<bool> m_CanRemove;
 
         protected override void OnCreate()
         {
@@ -40,15 +43,21 @@ namespace CrosswalkWidth.Systems
             AddBinding(m_ToolActive = new ValueBinding<bool>(kGroup, "toolActive", false));
             AddBinding(m_HasSelection = new ValueBinding<bool>(kGroup, "hasSelection", false));
             AddBinding(m_SelectedPercent = new ValueBinding<int>(kGroup, "selectedPercent", 100));
-            AddBinding(m_GlobalPercent = new ValueBinding<int>(kGroup, "globalPercent", 200));
+            AddBinding(m_GlobalPercent = new ValueBinding<int>(kGroup, "globalPercent", 150));
             AddBinding(m_CrossingNumber = new ValueBinding<int>(kGroup, "crossingNumber", 0));
             AddBinding(m_CrossingCount = new ValueBinding<int>(kGroup, "crossingCount", 0));
+            AddBinding(m_CanScramble = new ValueBinding<bool>(kGroup, "canScramble", false));
+            AddBinding(m_HasScramble = new ValueBinding<bool>(kGroup, "hasScramble", false));
+            AddBinding(m_CanRemove = new ValueBinding<bool>(kGroup, "canRemove", false));
 
             AddBinding(new TriggerBinding(kGroup, "toggleTool", ToggleTool));
             AddBinding(new TriggerBinding(kGroup, "widen", () => m_PickerTool.AdjustSelected(1)));
             AddBinding(new TriggerBinding(kGroup, "narrow", () => m_PickerTool.AdjustSelected(-1)));
             AddBinding(new TriggerBinding(kGroup, "resetSelected", m_PickerTool.ResetSelected));
+            AddBinding(new TriggerBinding(kGroup, "resetJunction", m_PickerTool.ResetJunction));
             AddBinding(new TriggerBinding(kGroup, "applyToJunction", m_PickerTool.ApplyToWholeJunction));
+            AddBinding(new TriggerBinding(kGroup, "toggleScramble", m_PickerTool.ToggleScramble));
+            AddBinding(new TriggerBinding(kGroup, "removeSelected", m_PickerTool.RemoveSelected));
         }
 
         protected override void OnUpdate()
@@ -63,6 +72,14 @@ namespace CrosswalkWidth.Systems
                 && m_PickerTool.selectedCrossingNumber > 0;
 
             m_HasSelection.Update(hasSelection);
+
+            // Read from the junction rather than the crossing: the button is about the junction as
+            // a whole, and it stays usable when the tool has a junction but no crossing picked.
+            bool onJunction = active && m_PickerTool.selectedNode != Unity.Entities.Entity.Null;
+
+            m_CanRemove.Update(hasSelection && m_PickerTool.selectedIsAdded);
+            m_CanScramble.Update(onJunction && m_PickerTool.canScramble);
+            m_HasScramble.Update(onJunction && m_PickerTool.hasScramble);
             m_CrossingCount.Update(m_PickerTool.crossingCount);
             m_CrossingNumber.Update(m_PickerTool.selectedCrossingNumber);
 

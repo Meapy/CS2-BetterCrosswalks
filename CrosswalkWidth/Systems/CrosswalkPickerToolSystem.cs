@@ -1,3 +1,4 @@
+using Colossal.Mathematics;
 using System.Collections.Generic;
 using Game.Common;
 using Game.Net;
@@ -43,10 +44,20 @@ namespace CrosswalkWidth.Systems
         /// <summary>Handles are rings, not discs: the fill is fully transparent.</summary>
         private static readonly Color kHandleClear = new Color(0f, 0f, 0f, 0f);
 
-        /// <summary>How near the cursor has to be to a crossing's middle to grab it, in metres.</summary>
-        private const float kPickRadius = 14f;
+        /// <summary>How far outside the painted band a click still counts as being on it, in metres.</summary>
+        private const float kPickMargin = 2.5f;
+
+        /// <summary>Points sampled along a crossing's curve when measuring how far the cursor is from it.</summary>
+        private const int kCurveSamples = 16;
+
+        /// <summary>How near a handle the cursor has to be to take hold of it, in metres.</summary>
+        private const float kHandleGrab = 5f;
+
+        /// <summary>How far beyond the painted edge the width handles sit, in metres.</summary>
+        private const float kSideHandleClear = 2.5f;
 
         private CrosswalkOverrideSystem m_OverrideSystem;
+        private CrosswalkScrambleSystem m_ScrambleSystem;
         private OverlayRenderSystem m_OverlayRenderSystem;
 
         private readonly List<CrosswalkOverrideSystem.CrossingInfo> m_Crossings =
@@ -59,13 +70,46 @@ namespace CrosswalkWidth.Systems
         private int m_PendingSteps;
         private bool m_LoggedFirstHover;
 
-        private bool m_Dragging;
+        /// <summary>What a drag on the live crossing is doing.</summary>
+        private enum DragMode
+        {
+            None,
+
+            /// <summary>Pulling the band wider or narrower.</summary>
+            Width,
+
+            /// <summary>Sliding the whole crossing along the road.</summary>
+            Move,
+
+            /// <summary>Swinging the end the crossing starts from.</summary>
+            MoveStart,
+
+            /// <summary>Swinging the end the crossing points to.</summary>
+            MoveEnd
+        }
+
+        private DragMode m_Dragging;
         private float m_DragStartRadius;
         private float m_DragStartScale;
+
+        /// <summary>Direction traffic travels at the crossing, fixed when the drag starts.</summary>
+        private float2 m_DragRoad;
+
+        /// <summary>Where along the road the cursor was when the drag started.</summary>
+        private float m_DragStartAlong;
+
+        /// <summary>The crossing's shift when the drag started, so the drag is relative.</summary>
+        private float2 m_DragStartShift;
+
+        /// <summary>Which handle the cursor is over, for drawing. Mirrors the drag modes.</summary>
+        private DragMode m_Hovered;
 
         public override string toolID => kToolID;
 
         public Entity selectedNode => m_Selected;
+
+        /// <summary>True while the mouse button is down on a handle.</summary>
+        public bool isDragging => m_Dragging != DragMode.None;
 
         /// <summary>How many crossings the selected junction has.</summary>
         public int crossingCount => m_Crossings.Count;
@@ -88,6 +132,7 @@ namespace CrosswalkWidth.Systems
             base.OnCreate();
 
             m_OverrideSystem = World.GetOrCreateSystemManaged<CrosswalkOverrideSystem>();
+            m_ScrambleSystem = World.GetOrCreateSystemManaged<CrosswalkScrambleSystem>();
             m_OverlayRenderSystem = World.GetOrCreateSystemManaged<OverlayRenderSystem>();
         }
 
@@ -99,7 +144,8 @@ namespace CrosswalkWidth.Systems
             m_Selected = Entity.Null;
             m_SelectedCrossing = -1;
             m_HoveredCrossing = -1;
-            m_Dragging = false;
+            m_Dragging = DragMode.None;
+            m_Hovered = DragMode.None;
             m_LoggedFirstHover = false;
             m_Crossings.Clear();
             requireNet = Layer.Road;
@@ -120,7 +166,8 @@ namespace CrosswalkWidth.Systems
 
             m_Selected = Entity.Null;
             m_SelectedCrossing = -1;
-            m_Dragging = false;
+            m_Dragging = DragMode.None;
+            m_Hovered = DragMode.None;
             m_Crossings.Clear();
 
             Mod.Log.Info($"{Mod.ModName}: crossing tool stopped");
@@ -153,6 +200,21 @@ namespace CrosswalkWidth.Systems
             // Deliberately nothing: scrolling stays camera zoom while this tool is active.
         }
 
+        /// <summary>
+        /// The number the crossing being edited stores its width and position under.
+        ///
+        /// Not the same as its place in this list. The junction's own crossings are numbered by
+        /// their place in its lane list, and the middle crossings — which are not in that list at
+        /// all — are numbered by which diagonal they are. Using the position for both was fine while
+        /// the two matched; it stopped being fine the moment middle crossings joined the list.
+        /// </summary>
+        private int SelectedKey()
+        {
+            return m_SelectedCrossing >= 0 && m_SelectedCrossing < m_Crossings.Count
+                ? m_Crossings[m_SelectedCrossing].m_Index
+                : -1;
+        }
+
         /// <summary>Widens or narrows the crossing being edited. Called from the toolbar panel.</summary>
         public void AdjustSelected(int steps)
         {
@@ -163,9 +225,9 @@ namespace CrosswalkWidth.Systems
 
             CrosswalkWidthSetting settings = Mod.Settings;
             float step = (settings != null ? settings.ToolStepPercentage : 25) / 100f;
-            float scale = m_OverrideSystem.GetScale(m_Selected, m_SelectedCrossing) + step * steps;
+            float scale = m_OverrideSystem.GetScale(m_Selected, SelectedKey()) + step * steps;
 
-            m_OverrideSystem.SetOverride(m_Selected, m_SelectedCrossing, math.max(0.25f, scale));
+            m_OverrideSystem.SetOverride(m_Selected, SelectedKey(), math.max(0.25f, scale));
 
             Mod.Log.Info(
                 $"{Mod.ModName}: junction {m_Selected.Index} crossing {selectedCrossingNumber} "
@@ -180,10 +242,92 @@ namespace CrosswalkWidth.Systems
                 return;
             }
 
-            m_OverrideSystem.SetOverride(m_Selected, m_SelectedCrossing, 0f);
+            m_OverrideSystem.SetOverride(m_Selected, SelectedKey(), 0f);
+            m_OverrideSystem.SetShift(m_Selected, SelectedKey(), default(float2));
+            m_OverrideSystem.RequestFullPass();
+
             Mod.Log.Info(
                 $"{Mod.ModName}: junction {m_Selected.Index} crossing {selectedCrossingNumber} "
                 + "back on the global width");
+        }
+
+        /// <summary>
+        /// Puts the whole junction back on the global width, in its original position.
+        ///
+        /// One call does it: clearing a junction's own width also restores every crossing there
+        /// that has been moved and drops the per-crossing entries, because the record of where a
+        /// moved crossing belongs lives in those entries and has to be used before it is thrown
+        /// away. Crossings through the middle go too — they are something added by hand, and this
+        /// is the button for undoing what was done by hand here.
+        /// </summary>
+        public void ResetJunction()
+        {
+            if (m_Selected == Entity.Null)
+            {
+                return;
+            }
+
+            m_OverrideSystem.SetOverride(m_Selected, -1, 0f);
+
+            if (m_ScrambleSystem != null)
+            {
+                m_ScrambleSystem.SetScramble(m_Selected, false);
+            }
+
+            m_OverrideSystem.RequestFullPass();
+
+            Mod.Log.Info(
+                $"{Mod.ModName}: junction {m_Selected.Index} back to global — every crossing here "
+                + "returned to its width and position");
+        }
+
+        /// <summary>True if the selected junction has enough roads meeting at it for a scramble.</summary>
+        public bool canScramble => m_ScrambleSystem != null && m_ScrambleSystem.CanScramble(m_Selected);
+
+        /// <summary>True if the selected junction already has crossings through the middle.</summary>
+        public bool hasScramble => m_ScrambleSystem != null && m_ScrambleSystem.HasScramble(m_Selected);
+
+        /// <summary>
+        /// Adds crossings corner to corner through the middle of the selected junction, or takes
+        /// them away again if they are already there.
+        /// </summary>
+        public void ToggleScramble()
+        {
+            if (m_Selected == Entity.Null || m_ScrambleSystem == null)
+            {
+                return;
+            }
+
+            m_ScrambleSystem.SetScramble(m_Selected, !m_ScrambleSystem.HasScramble(m_Selected));
+        }
+
+        /// <summary>True if the crossing being edited is one this mod laid, and so can be removed.</summary>
+        public bool selectedIsAdded =>
+            m_SelectedCrossing >= 0
+            && m_SelectedCrossing < m_Crossings.Count
+            && m_Crossings[m_SelectedCrossing].m_IsAdded;
+
+        /// <summary>
+        /// Takes the crossing being edited out of the junction.
+        ///
+        /// Only a middle crossing can go. The junction's own crossings come from the road it is
+        /// built with — the game lays them and would lay them again immediately — so there is
+        /// nothing this could do about one except make it flicker.
+        /// </summary>
+        public void RemoveSelected()
+        {
+            if (!selectedIsAdded || m_ScrambleSystem == null)
+            {
+                return;
+            }
+
+            Entity lane = m_Crossings[m_SelectedCrossing].m_Lane;
+
+            if (m_ScrambleSystem.RemoveOne(lane))
+            {
+                m_SelectedCrossing = -1;
+                m_OverrideSystem.RequestNode(m_Selected);
+            }
         }
 
         /// <summary>Gives every crossing at this junction the width of the one being edited.</summary>
@@ -194,11 +338,11 @@ namespace CrosswalkWidth.Systems
                 return;
             }
 
-            float scale = m_OverrideSystem.GetScale(m_Selected, m_SelectedCrossing);
+            float scale = m_OverrideSystem.GetScale(m_Selected, SelectedKey());
 
             for (int i = 0; i < m_Crossings.Count; i++)
             {
-                m_OverrideSystem.SetOverride(m_Selected, i, scale);
+                m_OverrideSystem.SetOverride(m_Selected, m_Crossings[i].m_Index, scale);
             }
 
             Mod.Log.Info(
@@ -214,7 +358,7 @@ namespace CrosswalkWidth.Systems
                 return 0;
             }
 
-            return (int)math.round(m_OverrideSystem.GetScale(m_Selected, m_SelectedCrossing) * 100f);
+            return (int)math.round(m_OverrideSystem.GetScale(m_Selected, SelectedKey()) * 100f);
         }
 
         protected override JobHandle OnUpdate(JobHandle inputDeps)
@@ -250,9 +394,13 @@ namespace CrosswalkWidth.Systems
                 m_Crossings.Clear();
             }
 
-            m_HoveredCrossing = hasHit ? NearestCrossing(hit.m_HitPosition) : -1;
+            m_HoveredCrossing = hasHit ? NearestCrossing(hit.m_HitPosition, kPickMargin) : -1;
 
-            if (m_Dragging)
+            m_Hovered = m_Dragging != DragMode.None
+                ? m_Dragging
+                : (hasHit ? ModeAt(hit.m_HitPosition) : DragMode.None);
+
+            if (m_Dragging != DragMode.None)
             {
                 if (applyAction.IsPressed())
                 {
@@ -263,8 +411,15 @@ namespace CrosswalkWidth.Systems
                 }
                 else
                 {
-                    m_Dragging = false;
-                    Mod.Log.Info($"{Mod.ModName}: drag finished at {SelectedPercent()}%");
+                    Mod.Log.Info($"{Mod.ModName}: {m_Dragging} drag finished");
+                    m_Dragging = DragMode.None;
+
+                    // The junction clearance follows the widest crossing anywhere, and an
+                    // incremental pass can only ever raise that figure — it has not looked at the
+                    // rest of the city. A full sweep after the drag lets it come back down again,
+                    // so narrowing a crossing lets the junctions close up rather than leaving them
+                    // permanently sized for the widest thing ever set.
+                    m_OverrideSystem.RequestFullPass();
                 }
 
                 DrawHandles(hit);
@@ -275,28 +430,40 @@ namespace CrosswalkWidth.Systems
 
             if (applyAction.WasPressedThisFrame())
             {
-                if (m_HoveredCrossing >= 0)
+                bool haveLive = m_Selected != Entity.Null
+                    && m_SelectedCrossing >= 0
+                    && m_SelectedCrossing < m_Crossings.Count;
+
+                // A handle wins over everything else. The end handles of a long crossing sit well
+                // away from its middle, so the crossing whose middle is nearest the cursor is often
+                // not the one whose handle is under it — and without this, reaching for an end
+                // handle silently switches to the neighbouring crossing instead of grabbing the
+                // thing you were pointing at.
+                bool onHandle = hasHit && haveLive && m_Hovered != DragMode.None;
+
+                if (onHandle || (haveLive && m_HoveredCrossing == m_SelectedCrossing))
                 {
-                    // Pressing on a crossing that is already the live one starts a drag; otherwise
-                    // it becomes the live one first, so a single press never both switches crossing
-                    // and resizes it.
-                    if (m_HoveredCrossing == m_SelectedCrossing)
-                    {
-                        BeginDrag(hit);
-                    }
-                    else
-                    {
-                        m_SelectedCrossing = m_HoveredCrossing;
-                        Mod.Log.Info(
-                            $"{Mod.ModName}: junction {m_Selected.Index} crossing "
-                            + $"{selectedCrossingNumber} of {m_Crossings.Count} at {SelectedPercent()}%");
-                    }
+                    // Pressing on the crossing that is already live starts a drag; pressing on a
+                    // different one makes it live first, so a single press never both switches
+                    // crossing and changes it.
+                    BeginDrag(hit);
+                }
+                else if (m_HoveredCrossing >= 0 && m_Selected != Entity.Null)
+                {
+                    m_SelectedCrossing = m_HoveredCrossing;
+                    Mod.Log.Info(
+                        $"{Mod.ModName}: junction {m_Selected.Index} crossing "
+                        + $"{selectedCrossingNumber} of {m_Crossings.Count} at {SelectedPercent()}%");
                 }
                 else if (node != Entity.Null)
                 {
                     m_Selected = node;
                     m_OverrideSystem.CollectCrossings(m_Selected, m_Crossings);
-                    m_SelectedCrossing = m_Crossings.Count > 0 ? NearestCrossing(hit.m_HitPosition) : -1;
+                    // No limit here: the junction was just clicked and one of its crossings has to
+                    // be the live one, even if the click landed on bare road inside the junction.
+                    m_SelectedCrossing = m_Crossings.Count > 0
+                        ? NearestCrossing(hit.m_HitPosition, float.MaxValue)
+                        : -1;
 
                     Mod.Log.Info(
                         $"{Mod.ModName}: selected junction {node.Index} with {m_Crossings.Count} crossings");
@@ -320,19 +487,48 @@ namespace CrosswalkWidth.Systems
             return inputDeps;
         }
 
-        /// <summary>Index of the crossing whose middle is nearest the cursor, or -1 if none is near.</summary>
-        private int NearestCrossing(float3 point)
+        /// <summary>
+        /// The crossing the cursor is on: the one whose painted band it is nearest, or inside.
+        ///
+        /// This used to be the crossing whose **midpoint** was nearest, within fourteen metres. A
+        /// midpoint is one point on a band that can be twenty metres long, so pointing anywhere near
+        /// the end of a crossing was nearer the neighbouring crossing's middle than its own, and
+        /// picked that one instead. The middle crossings made it plainly wrong rather than merely
+        /// inaccurate: two diagonals of a scramble cross at the junction's centre, so their midpoints
+        /// are within a metre or two of each other and of every other midpoint there. Which one a
+        /// click landed on was, in effect, arbitrary.
+        ///
+        /// So the measurement is to the whole band, not to a point on it: the distance from the
+        /// cursor to the crossing's curve, less half of how wide that crossing is drawn. That is the
+        /// distance to the painted edge, and it goes negative inside the paint — which is what makes
+        /// the crossing the cursor is standing on win outright, and, where two overlap, the one whose
+        /// centre it is nearer relative to that crossing's own width.
+        ///
+        /// <paramref name="reach"/> is how far outside the paint still counts. Hovering wants that
+        /// short, so that pointing at bare road selects nothing; picking a crossing to start with
+        /// when a junction is first clicked passes no limit, because something has to be chosen.
+        /// </summary>
+        private int NearestCrossing(float3 point, float reach)
         {
             int best = -1;
-            float bestDistance = kPickRadius * kPickRadius;
+            float bestScore = reach;
 
             for (int i = 0; i < m_Crossings.Count; i++)
             {
-                float distance = DistanceSq(m_Crossings[i].m_Midpoint, point);
+                CrosswalkOverrideSystem.CrossingInfo crossing = m_Crossings[i];
 
-                if (distance < bestDistance)
+                float width = DrawnWidth(crossing);
+
+                if (!IsDrawn(width))
                 {
-                    bestDistance = distance;
+                    continue;   // nothing is painted there, so there is nothing to point at
+                }
+
+                float score = PlanDistanceToCurve(crossing.m_Curve, point) - width * 0.5f;
+
+                if (score < bestScore)
+                {
+                    bestScore = score;
                     best = i;
                 }
             }
@@ -341,10 +537,228 @@ namespace CrosswalkWidth.Systems
         }
 
         /// <summary>
+        /// How far a point lies from a curve on the ground plane, in metres.
+        ///
+        /// The curve is walked as a chain of straight pieces rather than solved for, which is exact
+        /// enough at this scale — a crossing bends by very little over its length — and cannot fail
+        /// to converge on the one that barely bends at all.
+        ///
+        /// Height is left out on purpose. The cursor position is a terrain hit, while a diagonal is
+        /// deliberately lifted over the crown of the junction, so including height would report every
+        /// diagonal as further away than it looks and hand the pick to a flat crossing beside it.
+        /// </summary>
+        private static float PlanDistanceToCurve(Bezier4x3 curve, float3 point)
+        {
+            float best = float.MaxValue;
+            float3 previous = Evaluate(curve, 0f);
+
+            for (int i = 1; i <= kCurveSamples; i++)
+            {
+                float3 next = Evaluate(curve, i / (float)kCurveSamples);
+                float distance = PlanDistanceToSegment(previous, next, point);
+
+                if (distance < best)
+                {
+                    best = distance;
+                }
+
+                previous = next;
+            }
+
+            return best;
+        }
+
+        /// <summary>How far a point lies from a straight piece, on the ground plane.</summary>
+        private static float PlanDistanceToSegment(float3 a, float3 b, float3 point)
+        {
+            float dx = b.x - a.x;
+            float dz = b.z - a.z;
+            float lengthSq = dx * dx + dz * dz;
+
+            if (lengthSq < 0.0001f)
+            {
+                return math.sqrt(DistanceSq(a, point));
+            }
+
+            float along = ((point.x - a.x) * dx + (point.z - a.z) * dz) / lengthSq;
+            along = math.clamp(along, 0f, 1f);
+
+            float offX = point.x - (a.x + dx * along);
+            float offZ = point.z - (a.z + dz * along);
+
+            return math.sqrt(offX * offX + offZ * offZ);
+        }
+
+        /// <summary>A point along a curve.</summary>
+        private static float3 Evaluate(Bezier4x3 curve, float t)
+        {
+            float u = 1f - t;
+            float wa = u * u * u;
+            float wb = 3f * u * u * t;
+            float wc = 3f * u * t * t;
+            float wd = t * t * t;
+
+            return new float3(
+                curve.a.x * wa + curve.b.x * wb + curve.c.x * wc + curve.d.x * wd,
+                curve.a.y * wa + curve.b.y * wb + curve.c.y * wc + curve.d.y * wd,
+                curve.a.z * wa + curve.b.z * wb + curve.c.z * wc + curve.d.z * wd);
+        }
+
+        /// <summary>
+        /// How wide one crossing is drawn, in metres.
+        ///
+        /// By its own key, never by its place in the list. Those two stopped matching when the middle
+        /// crossings joined the list, and reading the scale by position drew every middle crossing at
+        /// whatever width the junction's crossing in that position happened to be set to.
+        /// </summary>
+        private float DrawnWidth(CrosswalkOverrideSystem.CrossingInfo crossing)
+        {
+            return crossing.m_AuthoredWidth * m_OverrideSystem.GetScale(m_Selected, crossing.m_Index);
+        }
+
+        /// <summary>
+        /// Whether a crossing of this width is drawn at all.
+        ///
+        /// Picking and drawing ask the same question, because a crossing that is not painted must
+        /// not be selectable: the panel would report a crossing the player cannot see, with handles
+        /// hanging off a band of no width. A crossing reaches zero here only when the catalog does
+        /// not know its prefab, which is the same reason it is not drawn.
+        /// </summary>
+        private static bool IsDrawn(float width)
+        {
+            return width > 0.01f;
+        }
+
+        /// <summary>
+        /// The five places on a crossing worth grabbing: its two ends, its middle, and a point just
+        /// off each side of the painted band.
+        ///
+        /// Every gesture is one of these, and every one of them is drawn. The first version worked
+        /// the other way round — it decided from zones, with "anywhere off to the side" meaning
+        /// resize — and that quietly made resizing unreachable: the zone began further out than the
+        /// distance at which a press is taken to mean "select the neighbouring crossing instead",
+        /// so a press meant to widen switched crossings. A handle you can see and a handle you can
+        /// hit are the same thing here.
+        ///
+        /// That is why a press on **any** of these five, the side ones included, acts on the live
+        /// crossing rather than deferring to whichever crossing the cursor is nearest. The side
+        /// handles are the only ones that sit off the paint, so they are the only ones where the two
+        /// can disagree — and on a scramble they always disagree, because the other diagonal runs
+        /// through the middle of this one and its paint covers both side handles. Deferring there
+        /// made resizing a diagonal impossible: each press simply swapped which diagonal was live,
+        /// while the handle stayed lit under the cursor the whole time.
+        /// </summary>
+        private bool HandleSpots(
+            CrosswalkOverrideSystem.CrossingInfo crossing,
+            out float3 start,
+            out float3 end,
+            out float3 middle,
+            out float3 sideA,
+            out float3 sideB)
+        {
+            start = crossing.m_Curve.a;
+            end = crossing.m_Curve.d;
+            middle = crossing.m_Midpoint;
+            sideA = middle;
+            sideB = middle;
+
+            if (!Axes(crossing, out float2 _unused, out float2 road, out float _half))
+            {
+                return false;
+            }
+
+            // Just clear of the painted edge, so the side handles read as "the edge of the band"
+            // rather than as two more dots floating in the road.
+            float width = math.max(1f, crossing.m_AuthoredWidth
+                * m_OverrideSystem.GetScale(m_Selected, SelectedKey()));
+
+            float reach = width * 0.5f + kSideHandleClear;
+
+            sideA.x += road.x * reach;
+            sideA.z += road.y * reach;
+
+            sideB.x -= road.x * reach;
+            sideB.z -= road.y * reach;
+
+            return true;
+        }
+
+        /// <summary>Which gesture a press at this point means: the nearest handle, if one is near.</summary>
+        private DragMode ModeAt(float3 point)
+        {
+            if (m_SelectedCrossing < 0 || m_SelectedCrossing >= m_Crossings.Count)
+            {
+                return DragMode.None;
+            }
+
+            CrosswalkOverrideSystem.CrossingInfo crossing = m_Crossings[m_SelectedCrossing];
+
+            if (!HandleSpots(crossing, out float3 start, out float3 end, out float3 middle,
+                out float3 sideA, out float3 sideB))
+            {
+                return DragMode.None;
+            }
+
+            DragMode best = DragMode.None;
+            float bestDistance = kHandleGrab * kHandleGrab;
+
+            Closest(point, start, DragMode.MoveStart, ref best, ref bestDistance);
+            Closest(point, end, DragMode.MoveEnd, ref best, ref bestDistance);
+            Closest(point, middle, DragMode.Move, ref best, ref bestDistance);
+            Closest(point, sideA, DragMode.Width, ref best, ref bestDistance);
+            Closest(point, sideB, DragMode.Width, ref best, ref bestDistance);
+
+            return best;
+        }
+
+        private static void Closest(float3 point, float3 handle, DragMode mode, ref DragMode best, ref float bestDistance)
+        {
+            float distance = DistanceSq(handle, point);
+
+            if (distance < bestDistance)
+            {
+                bestDistance = distance;
+                best = mode;
+            }
+        }
+
+        /// <summary>
+        /// The crossing's two axes in the ground plane: across the road, and along it.
+        ///
+        /// The along-the-road direction is a quarter turn from the crossing's own — the same
+        /// derivation CrosswalkOverrideSystem uses when it applies a shift, so a drag of one metre
+        /// here is a shift of one metre there and in the same direction.
+        /// </summary>
+        private static bool Axes(
+            CrosswalkOverrideSystem.CrossingInfo crossing,
+            out float2 across,
+            out float2 road,
+            out float halfLength)
+        {
+            float dx = crossing.m_Curve.d.x - crossing.m_Curve.a.x;
+            float dz = crossing.m_Curve.d.z - crossing.m_Curve.a.z;
+            float length = math.sqrt(dx * dx + dz * dz);
+
+            if (length < 0.5f)
+            {
+                across = default(float2);
+                road = default(float2);
+                halfLength = 0f;
+                return false;
+            }
+
+            across = new float2(dx / length, dz / length);
+            road = new float2(across.y, -across.x);
+            halfLength = length * 0.5f;
+
+            return true;
+        }
+
+        /// <summary>
         /// Starts a drag on the crossing being edited.
         ///
-        /// Relative rather than absolute: it records how far the cursor is from the crossing's
-        /// middle when the button goes down and scales from there, so the width does not jump when
+        /// Relative rather than absolute in every mode: what is recorded is where the cursor was
+        /// when the button went down and what the crossing was then, so nothing jumps at the moment
         /// the drag starts and the gesture works the same at any zoom.
         /// </summary>
         private void BeginDrag(RaycastHit hit)
@@ -354,38 +768,100 @@ namespace CrosswalkWidth.Systems
                 return;
             }
 
-            float radius = math.sqrt(DistanceSq(m_Crossings[m_SelectedCrossing].m_Midpoint, hit.m_HitPosition));
+            DragMode mode = ModeAt(hit.m_HitPosition);
 
-            if (radius < 0.5f)
+            if (mode == DragMode.None)
             {
-                return;   // too close to the middle for a ratio to mean anything
+                return;
             }
 
-            m_Dragging = true;
-            m_DragStartRadius = radius;
-            m_DragStartScale = m_OverrideSystem.GetScale(m_Selected, m_SelectedCrossing);
+            CrosswalkOverrideSystem.CrossingInfo crossing = m_Crossings[m_SelectedCrossing];
+
+            if (!Axes(crossing, out float2 unusedAcross, out float2 road, out float unusedHalfLength))
+            {
+                return;
+            }
+
+            if (mode == DragMode.Width)
+            {
+                // Measured along the road, which is the direction the band's edges move in. The
+                // radial distance the first version used grew when the cursor slid *along* the
+                // crossing as well, so a drag that never went near the edge still resized it.
+                float reach = math.abs(SidewaysOf(hit.m_HitPosition, crossing.m_Midpoint, road));
+
+                if (reach < 0.5f)
+                {
+                    return;   // on the centreline; a ratio from here means nothing
+                }
+
+                m_Dragging = DragMode.Width;
+                m_DragRoad = road;
+                m_DragStartRadius = reach;
+                m_DragStartScale = m_OverrideSystem.GetScale(m_Selected, SelectedKey());
+
+                Mod.Log.Info(
+                    $"{Mod.ModName}: resizing junction {m_Selected.Index} crossing "
+                    + $"{selectedCrossingNumber} from {SelectedPercent()}%");
+
+                return;
+            }
+
+            m_Dragging = mode;
+            m_DragRoad = road;
+            m_DragStartAlong = hit.m_HitPosition.x * road.x + hit.m_HitPosition.z * road.y;
+            m_DragStartShift = m_OverrideSystem.GetShift(m_Selected, SelectedKey());
 
             Mod.Log.Info(
-                $"{Mod.ModName}: dragging junction {m_Selected.Index} crossing "
-                + $"{selectedCrossingNumber} from {SelectedPercent()}%");
+                $"{Mod.ModName}: moving junction {m_Selected.Index} crossing "
+                + $"{selectedCrossingNumber} ({mode})");
         }
 
         private void UpdateDrag(RaycastHit hit)
         {
-            if (m_SelectedCrossing < 0 || m_SelectedCrossing >= m_Crossings.Count || m_DragStartRadius < 0.5f)
+            if (m_SelectedCrossing < 0 || m_SelectedCrossing >= m_Crossings.Count)
             {
                 return;
             }
 
-            float radius = math.sqrt(DistanceSq(m_Crossings[m_SelectedCrossing].m_Midpoint, hit.m_HitPosition));
-
-            if (radius < 0.5f)
+            if (m_Dragging == DragMode.Width)
             {
+                if (m_DragStartRadius < 0.5f)
+                {
+                    return;
+                }
+
+                float reach = math.abs(SidewaysOf(
+                    hit.m_HitPosition,
+                    m_Crossings[m_SelectedCrossing].m_Midpoint,
+                    m_DragRoad));
+
+                if (reach < 0.5f)
+                {
+                    return;
+                }
+
+                float scale = m_DragStartScale * (reach / m_DragStartRadius);
+                m_OverrideSystem.SetOverride(m_Selected, SelectedKey(), math.clamp(scale, 0.25f, 8f));
+
                 return;
             }
 
-            float scale = m_DragStartScale * (radius / m_DragStartRadius);
-            m_OverrideSystem.SetOverride(m_Selected, m_SelectedCrossing, math.clamp(scale, 0.25f, 8f));
+            float along = hit.m_HitPosition.x * m_DragRoad.x + hit.m_HitPosition.z * m_DragRoad.y;
+            float moved = along - m_DragStartAlong;
+
+            float2 shift = m_DragStartShift;
+
+            if (m_Dragging == DragMode.Move || m_Dragging == DragMode.MoveStart)
+            {
+                shift.x += moved;
+            }
+
+            if (m_Dragging == DragMode.Move || m_Dragging == DragMode.MoveEnd)
+            {
+                shift.y += moved;
+            }
+
+            m_OverrideSystem.SetShift(m_Selected, SelectedKey(), shift);
         }
 
         /// <summary>
@@ -410,16 +886,19 @@ namespace CrosswalkWidth.Systems
 
             Color idleOutline = new Color(0.55f, 0.85f, 1f, 0.55f);
             Color idleFill = new Color(0.35f, 0.75f, 1f, 0.12f);
-            Color liveOutline = m_Dragging ? new Color(1f, 0.8f, 0.3f, 1f) : new Color(0.4f, 1f, 0.7f, 0.95f);
-            Color liveFill = m_Dragging ? new Color(1f, 0.8f, 0.3f, 0.3f) : new Color(0.4f, 1f, 0.7f, 0.25f);
+            bool dragging = m_Dragging != DragMode.None;
+
+            Color liveOutline = dragging ? new Color(1f, 0.8f, 0.3f, 1f) : new Color(0.4f, 1f, 0.7f, 0.95f);
+            Color liveFill = dragging ? new Color(1f, 0.8f, 0.3f, 0.3f) : new Color(0.4f, 1f, 0.7f, 0.25f);
+            Color hotOutline = new Color(1f, 0.85f, 0.35f, 1f);
 
             for (int i = 0; i < m_Crossings.Count; i++)
             {
                 CrosswalkOverrideSystem.CrossingInfo crossing = m_Crossings[i];
 
-                float width = crossing.m_AuthoredWidth * m_OverrideSystem.GetScale(m_Selected, i);
+                float width = DrawnWidth(crossing);
 
-                if (width <= 0.01f)
+                if (!IsDrawn(width))
                 {
                     continue;
                 }
@@ -439,26 +918,41 @@ namespace CrosswalkWidth.Systems
                     continue;
                 }
 
-                buffer.DrawCircle(
-                    liveOutline,
-                    kHandleClear,
-                    kOutlineWidth,
-                    OverlayRenderSystem.StyleFlags.Projected,
-                    default(float2),
-                    crossing.m_Curve.a,
-                    kHandleDiameter);
-
-                buffer.DrawCircle(
-                    liveOutline,
-                    kHandleClear,
-                    kOutlineWidth,
-                    OverlayRenderSystem.StyleFlags.Projected,
-                    default(float2),
-                    crossing.m_Curve.d,
-                    kHandleDiameter);
+                // Three handles, drawn where the gestures are: an end to swing, an end to swing,
+                // and the middle to slide the whole thing along the road. The one the cursor would
+                // act on is lit, which is the only hint needed that they do different things.
+                if (HandleSpots(crossing, out float3 handleStart, out float3 handleEnd,
+                    out float3 handleMiddle, out float3 handleSideA, out float3 handleSideB))
+                {
+                    DrawHandle(buffer, handleStart, DragMode.MoveStart, liveOutline, hotOutline);
+                    DrawHandle(buffer, handleEnd, DragMode.MoveEnd, liveOutline, hotOutline);
+                    DrawHandle(buffer, handleMiddle, DragMode.Move, liveOutline, hotOutline);
+                    DrawHandle(buffer, handleSideA, DragMode.Width, liveOutline, hotOutline);
+                    DrawHandle(buffer, handleSideB, DragMode.Width, liveOutline, hotOutline);
+                }
             }
 
             m_OverlayRenderSystem.AddBufferWriter(default(JobHandle));
+        }
+
+        /// <summary>One grab handle, lit if the cursor is on it.</summary>
+        private void DrawHandle(
+            OverlayRenderSystem.Buffer buffer,
+            float3 position,
+            DragMode mode,
+            Color idle,
+            Color hot)
+        {
+            bool active = m_Hovered == mode;
+
+            buffer.DrawCircle(
+                active ? hot : idle,
+                kHandleClear,
+                active ? kOutlineWidth * 1.6f : kOutlineWidth,
+                OverlayRenderSystem.StyleFlags.Projected,
+                default(float2),
+                position,
+                active ? kHandleDiameter * 1.3f : kHandleDiameter);
         }
 
         /// <summary>
@@ -505,6 +999,12 @@ namespace CrosswalkWidth.Systems
             }
 
             return DistanceSq(EntityManager.GetComponentData<Game.Net.Node>(node).m_Position, point);
+        }
+
+        /// <summary>How far a point lies from the crossing's centreline, measured along the road.</summary>
+        private static float SidewaysOf(float3 point, float3 middle, float2 road)
+        {
+            return (point.x - middle.x) * road.x + (point.z - middle.z) * road.y;
         }
 
         /// <summary>Squared distance on the ground plane. Height is ignored so a sloped junction picks cleanly.</summary>

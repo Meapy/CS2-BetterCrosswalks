@@ -24,9 +24,13 @@ namespace CrosswalkWidth
         /// </summary>
         internal static Systems.CrosswalkCatalog Catalog { get; set; }
 
+        /// <summary>The assembly version, so a log or a bug report says which build it came from.</summary>
+        public static string Version =>
+            System.Reflection.Assembly.GetExecutingAssembly().GetName().Version.ToString(3);
+
         public void OnLoad(UpdateSystem updateSystem)
         {
-            Log.Info($"{ModName}: OnLoad");
+            Log.Info($"{ModName}: OnLoad, version {Version}");
 
             Settings = new CrosswalkWidthSetting(this);
             Settings.RegisterInOptionsUI();
@@ -42,6 +46,13 @@ namespace CrosswalkWidth
             // from the composition whenever it re-lays a node, so a per-junction override has to be
             // applied after it or it is overwritten within the frame.
             updateSystem.UpdateAfter<CrosswalkOverrideSystem, Game.Net.LaneSystem>(
+                SystemUpdatePhase.Modification4);
+
+            // After the width pass, still in Modification4 and so still ahead of Modification4B —
+            // where the game adds new lanes to their junction's SubLane buffer, works out what they
+            // overlap and gives them a traffic light group. A diagonal laid here is picked up by
+            // all three later in the same frame.
+            updateSystem.UpdateAfter<CrosswalkScrambleSystem, CrosswalkOverrideSystem>(
                 SystemUpdatePhase.Modification4);
 
             // Tools live in their own phase, alongside the game's.

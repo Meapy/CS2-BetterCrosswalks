@@ -48,6 +48,15 @@
   margin-bottom: 8rem;
 }
 
+/* A quiet heading for the group of reset buttons, so it is clear both of them undo. */
+.subtitle {
+  font-size: 11rem;
+  text-transform: uppercase;
+  letter-spacing: 0.5rem;
+  opacity: 0.55;
+  margin: 10rem 0 4rem;
+}
+
 .row {
   display: flex;
   align-items: center;

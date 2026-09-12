@@ -11,6 +11,10 @@
     <Configurations>Debug;Release</Configurations>
     <PublishConfigurationPath>Properties\PublishConfiguration.xml</PublishConfigurationPath>
     <AllowUnsafeBlocks>false</AllowUnsafeBlocks>
+
+    <!-- Logged at startup, so a report names a version. Keep in step with ui/mod.json and
+         Properties/PublishConfiguration.xml, which the game and the store read separately. -->
+    <Version>1.0.0</Version>
   </PropertyGroup>
 
   <ItemGroup>

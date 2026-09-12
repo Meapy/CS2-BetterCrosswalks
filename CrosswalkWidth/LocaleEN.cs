@@ -18,12 +18,27 @@ namespace CrosswalkWidth
         {
             return new Dictionary<string, string>
             {
-                { m_Setting.GetSettingsLocaleID(), "Crosswalk Width" },
+                { m_Setting.GetSettingsLocaleID(), "Better Crosswalks" },
                 { m_Setting.GetOptionTabLocaleID(CrosswalkWidthSetting.SectionMain), "Main" },
 
-                { m_Setting.GetOptionGroupLocaleID(CrosswalkWidthSetting.GroupWidth), "Width" },
-                { m_Setting.GetOptionGroupLocaleID(CrosswalkWidthSetting.GroupTool), "One junction at a time" },
-                { m_Setting.GetOptionGroupLocaleID(CrosswalkWidthSetting.GroupApply), "Existing crossings" },
+                { m_Setting.GetOptionGroupLocaleID(CrosswalkWidthSetting.GroupWidth), "Crossings" },
+                { m_Setting.GetOptionGroupLocaleID(CrosswalkWidthSetting.GroupMaintenance), "Maintenance" },
+
+                {
+                    m_Setting.GetOptionLabelLocaleID(nameof(CrosswalkWidthSetting.RemoveModDataFromCity)),
+                    "Remove this mod's data from the city"
+                },
+                {
+                    m_Setting.GetOptionDescLocaleID(nameof(CrosswalkWidthSetting.RemoveModDataFromCity)),
+                    "Puts every crossing back to the width it was drawn at and forgets every " +
+                    "per-junction width in this city.\n\n" +
+                    "Do this, then save, before removing the mod, and the save is left exactly as " +
+                    "it would have been if the mod had never run."
+                },
+                {
+                    m_Setting.GetOptionWarningLocaleID(nameof(CrosswalkWidthSetting.RemoveModDataFromCity)),
+                    "This forgets every per-junction crossing width in this city. It cannot be undone."
+                },
 
                 {
                     m_Setting.GetOptionLabelLocaleID(nameof(CrosswalkWidthSetting.Enabled)),
@@ -31,9 +46,8 @@ namespace CrosswalkWidth
                 },
                 {
                     m_Setting.GetOptionDescLocaleID(nameof(CrosswalkWidthSetting.Enabled)),
-                    "Turn this off to put every crossing back to the width its asset author chose. " +
-                    "Crossings already laid keep their current width until you reload the save or " +
-                    "press Apply to existing crossings."
+                    "Turn this off to put every crossing in the city back to the width its asset " +
+                    "author chose. It takes effect straight away."
                 },
 
                 {
@@ -72,37 +86,32 @@ namespace CrosswalkWidth
                 },
 
                 {
-                    m_Setting.GetOptionLabelLocaleID(nameof(CrosswalkWidthSetting.StartCrosswalkTool)),
-                    "Start the crossing tool"
+                    m_Setting.GetOptionLabelLocaleID(nameof(CrosswalkWidthSetting.EnableMiddleCrossings)),
+                    "Crossings through the middle"
                 },
                 {
-                    m_Setting.GetOptionDescLocaleID(nameof(CrosswalkWidthSetting.StartCrosswalkTool)),
-                    "Sets the width of one junction's crossings without touching any other.\n\n" +
-                    "Press this, then close the options panel \u2014 the tool is already running. " +
-                    "Point at a junction to highlight it, then:\n\n" +
-                    "Page Up / Page Down \u2014 widen or narrow that junction's crossings\n" +
-                    "Left click \u2014 put that junction back on the global width\n" +
-                    "Right click \u2014 leave the tool\n\n" +
-                    "Per-junction widths are saved with the city."
+                    m_Setting.GetOptionDescLocaleID(nameof(CrosswalkWidthSetting.EnableMiddleCrossings)),
+                    "Junctions where four or more roads meet get crossings corner to corner "
+                    + "through the middle — a scramble crossing. The crossing tool edits and "
+                    + "removes them like any other crossing.\n\n"
+                    + "This is the only part of the mod that creates crossings rather than "
+                    + "resizing the ones the game laid, so it has a switch of its own. Turning it "
+                    + "off also clears any that are already in the city, a few at a time."
                 },
-
                 {
                     m_Setting.GetOptionLabelLocaleID(nameof(CrosswalkWidthSetting.ToolStepPercentage)),
                     "Tool step size"
                 },
                 {
                     m_Setting.GetOptionDescLocaleID(nameof(CrosswalkWidthSetting.ToolStepPercentage)),
-                    "How much one press of Page Up or Page Down changes the junction you are pointing at."
-                },
-
-                {
-                    m_Setting.GetOptionLabelLocaleID(nameof(CrosswalkWidthSetting.ClearPerJunctionWidths)),
-                    "Clear all per-junction widths"
-                },
-                {
-                    m_Setting.GetOptionDescLocaleID(nameof(CrosswalkWidthSetting.ClearPerJunctionWidths)),
-                    "Forgets every junction you have set by hand, so the whole city follows the " +
-                    "global width again."
+                    "How much one press of the crossing tool's narrower or wider button changes "
+                    + "the crossing you have selected.\n\n"
+                    + "The tool itself opens from the button at the top left of the screen. Click "
+                    + "a junction, then a crossing on it, and five rings appear: either end swings "
+                    + "that end up or down the road, the middle slides the whole crossing towards "
+                    + "or away from the junction, and either side pulls it wider or narrower. "
+                    + "Nothing you do to one crossing touches its neighbours, and everything set "
+                    + "there is saved with the city."
                 },
 
                 {
@@ -111,9 +120,28 @@ namespace CrosswalkWidth
                 },
                 {
                     m_Setting.GetOptionDescLocaleID(nameof(CrosswalkWidthSetting.ApplyToExistingCrossings)),
-                    "Lays every crossing in the city again at the current width, without reloading.\n\n" +
-                    "It hands every node and junction back to the game's own lane pipeline in one " +
-                    "go, so expect a pause on a large city."
+                    "Checks every crossing in the city against the current settings.\n\n" +
+                    "You should not need this: a change to any setting above is applied to the " +
+                    "whole city straight away, crossings already standing included. It is here for " +
+                    "the rare case where one gets missed."
+                },
+
+                {
+                    m_Setting.GetOptionLabelLocaleID(nameof(CrosswalkWidthSetting.ResetEverything)),
+                    "Put every crossing back to normal"
+                },
+                {
+                    m_Setting.GetOptionDescLocaleID(nameof(CrosswalkWidthSetting.ResetEverything)),
+                    "Returns every crossing in the city to exactly where and how the game lays it: " +
+                    "the width goes back to 100%, every junction you have set by hand is forgotten, " +
+                    "every crossing you have moved goes back, and the roads are handed to the game " +
+                    "to be shaped again.\n\n" +
+                    "The mod stays on, so you can start again from something that looks untouched. " +
+                    "Expect a pause while the city is rebuilt."
+                },
+                {
+                    m_Setting.GetOptionWarningLocaleID(nameof(CrosswalkWidthSetting.ResetEverything)),
+                    "This forgets every crossing you have widened or moved in this city, and cannot be undone."
                 },
 
                 {

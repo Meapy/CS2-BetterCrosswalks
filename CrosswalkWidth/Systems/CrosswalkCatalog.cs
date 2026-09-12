@@ -57,6 +57,18 @@ namespace CrosswalkWidth.Systems
         private readonly Dictionary<Entity, LaneBaseline> m_Lanes = new Dictionary<Entity, LaneBaseline>();
 
         /// <summary>
+        /// Themed variant → the placeholder lane a road actually declared.
+        ///
+        /// This matters more than it looks. LaneSystem lays a crossing from the variant but sizes
+        /// it from the placeholder: `NodeLane.m_WidthOffset = declaredWidth - variantWidth`. So the
+        /// width a crossing is really laid at is the *placeholder's*, and a mod that wants to scale
+        /// "what the game laid" has to know which placeholder a laid lane came from. Without this
+        /// map the scaling is measured from the wrong number and, worse, writing the offset would
+        /// throw away the game's own correction.
+        /// </summary>
+        private readonly Dictionary<Entity, Entity> m_DeclaredBy = new Dictionary<Entity, Entity>();
+
+        /// <summary>
         /// Used to read the authored width off the managed prefab rather than out of the ECS
         /// component.
         ///
@@ -82,6 +94,24 @@ namespace CrosswalkWidth.Systems
         public float AuthoredWidth(Entity lane)
         {
             return m_Lanes.TryGetValue(lane, out LaneBaseline baseline) ? baseline.m_Width : 0f;
+        }
+
+        /// <summary>
+        /// The lane a road declared, given the themed variant the game laid in its place. Returns
+        /// the lane itself when it is not a variant of anything, which is the common case.
+        /// </summary>
+        public Entity DeclaredLane(Entity laidLane)
+        {
+            return m_DeclaredBy.TryGetValue(laidLane, out Entity declared) ? declared : laidLane;
+        }
+
+        /// <summary>
+        /// The width the game lays this crossing at before this mod does anything: the declaring
+        /// placeholder's width, which LaneSystem reaches by way of NodeLane.m_WidthOffset.
+        /// </summary>
+        public float LaidWidth(Entity laidLane)
+        {
+            return AuthoredWidth(DeclaredLane(laidLane));
         }
 
         /// <summary>
@@ -195,7 +225,17 @@ namespace CrosswalkWidth.Systems
             {
                 Entity variant = variants[i].m_Object;
 
-                if (variant == Entity.Null || variant == lane || m_Lanes.ContainsKey(variant))
+                if (variant == Entity.Null || variant == lane)
+                {
+                    continue;
+                }
+
+                if (!m_DeclaredBy.ContainsKey(variant))
+                {
+                    m_DeclaredBy.Add(variant, lane);
+                }
+
+                if (m_Lanes.ContainsKey(variant))
                 {
                     continue;
                 }

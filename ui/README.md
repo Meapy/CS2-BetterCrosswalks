@@ -1,7 +1,10 @@
-# CrosswalkWidth — UI module
+# Better Crosswalks — UI module
 
-Frontend half of the mod. Adds the crossing-width button to the row of mod buttons at the top right
-of the screen, and the small panel that appears beside it while the tool is running.
+Frontend half of the mod. Adds the crossing button to the row of mod buttons at the top **left** of
+the screen, and the small panel that appears beside it while the tool is running.
+
+It is not optional. The toolbar button is the only way to open the tool, so a build with a stale or
+missing UI bundle has no tool at all — and it loads without complaining.
 
 The C# side (`CrosswalkToolUISystem`) publishes the tool's state as bindings in the
 `crosswalkWidth` group and takes the buttons' clicks as triggers. This module renders them.
@@ -16,9 +19,11 @@ toolchain rather than checking copies into the repo.
 the UI scaffolder. The template lives in the game folder instead:
 
 ```powershell
-cd C:\Users\dkras\OneDrive\Documents\GitHub\CS2-CrosswalkWidth\ui
+cd <your clone>\ui
 
-$tpl = "F:\SteamLibrary\steamapps\common\Cities Skylines II\Cities2_Data\Content\Game\.ModdingToolchain\npx-create-csii-ui-mod\template"
+# Wherever Cities: Skylines II is installed — the toolchain template ships inside the game folder.
+$game = "C:\Program Files (x86)\Steam\steamapps\common\Cities Skylines II"
+$tpl = "$game\Cities2_Data\Content\Game\.ModdingToolchain\npx-create-csii-ui-mod\template"
 Copy-Item "$tpl\package.json","$tpl\tsconfig.json","$tpl\webpack.config.js" -Destination .
 Copy-Item "$tpl\types","$tpl\tools" -Destination . -Recurse
 
@@ -56,4 +61,18 @@ A successful build does not prove the module loaded. Check `UI.log` for:
 - no exception from the module
 
 `CrosswalkWidth.log` on the managed side then shows `crossing tool running` when the button is
-pressed, `pointing at junction N` on first hover, and `selected junction N at NNN%` on click.
+pressed, `pointing at junction N` on first hover, and `selected junction N with M crossings` on
+click.
+
+## Labels that contain a value
+
+Build them as one template literal, never as JSX text with `{expressions}` in it:
+
+```tsx
+{`Same for all ${crossingCount} crossings here`}     // right
+Same for all {crossingCount} crossings here          // wrong
+```
+
+The game lays its interface out with flexbox, and the second form arrives as three text nodes, which
+become three flex items. It shipped as `Same for all 7crossings here`, and a heading written the same
+way broke across three lines as `Back to global (` / `150` / `%)`.

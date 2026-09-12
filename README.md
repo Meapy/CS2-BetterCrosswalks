@@ -1,83 +1,110 @@
-# Crosswalk Width
+# Better Crosswalks
 
-A Cities: Skylines II code mod that makes pedestrian crossings wider.
+A Cities: Skylines II code mod for pedestrian crossings: make them wider, shape them one at a time,
+and add crossings corner to corner through the middle of a junction.
 
-Crossings in Cities: Skylines II are a thin painted band that a queue of citizens shuffles across
-in single file. This puts a slider on how wide they are — more paint on the junction, and room for
-people to cross side by side.
+Crossings in Cities: Skylines II are a thin painted band that a queue of citizens shuffles across in
+single file. This widens the band and the strip people walk on together, so a crowd spreads out
+across it instead of filing over.
 
-## What you get
+![A junction with crossings through its middle](CrosswalkWidth/Properties/Screenshots/01-scramble-junction.jpg)
 
-| Setting | What it does |
+## What it does
+
+**Width, everywhere.** One slider, as a percentage of whatever width the crossing was drawn with
+rather than an absolute figure — crossings are not uniform to begin with, a side street's is narrow
+and a boulevard's is not, and one absolute value would flatten that. 150% out of the box, 25%–400%
+by hand. A floor and a ceiling in metres are there for the cases where a proportion is not what you
+want: "no crossing narrower than 4m" is a sensible rule, "every crossing exactly 4m" usually is not.
+
+**One junction at a time.** The toolbar button opens a tool. Click a junction, then a crossing on
+it, and five rings appear on that crossing:
+
+| Ring | Drag it to |
 | --- | --- |
-| **Crossing width** | A percentage of the crossing's own width, 25%–400%. 100% is the base game. |
-| **Minimum width** | A floor in metres, applied after the percentage. 0 turns it off. |
-| **Maximum width** | A ceiling in metres, applied after the percentage. 0 turns it off. |
-| **Start the crossing tool** | Point at one junction and change only its crossings. |
-| **Tool step size** | How much one Page Up or Page Down changes the junction under the cursor. |
-| **Clear all per-junction widths** | Forgets every junction set by hand. |
-| **Apply to existing crossings** | Re-lays the whole city's crossings without reloading. |
-| **List crossings in the log** | Writes every crossing lane found, before and after, to the game log. |
+| Either end | Swing that end up or down the road, for a crossing set at an angle rather than square across |
+| The middle | Slide the whole crossing towards or away from the junction |
+| Either side | Pull the crossing wider or narrower |
 
-A percentage rather than an absolute figure because crossings are not uniform to begin with — a
-side street's is narrow, a boulevard's is not — and one absolute value would flatten that. The
-floor and ceiling cover the cases where a proportion is not what you want.
+Nothing you do to one crossing touches its neighbours. The panel also has **−** and **+**, *Same for
+all N crossings here*, and a reset for the crossing or the whole junction. Everything set here is
+saved with the city.
+
+**Crossings through the middle.** Junctions where four or more roads meet can take crossings corner
+to corner through the middle — a scramble crossing, the kind Shibuya is known for. On by default,
+and the tool edits and removes them like any other crossing.
 
 ## How it works
 
-A crossing is not part of the road's cross-section at all. It is a **lane laid across the
-carriageway**:
+A crossing is not part of the road's cross-section. It is a **lane laid across the carriageway**:
 
-- `NetPieceCrosswalk` on a road piece declares a span across the road and names a lane prefab,
-  which becomes `NetCrosswalkData` on that piece.
+- `NetPieceCrosswalk` on a road piece declares a span across the road and names a lane prefab, which
+  becomes `NetCrosswalkData` on that piece.
 - `AddCompositionCrosswalks` merges adjacent spans into one `NetCompositionCrosswalk` per
   composition.
 - `LaneSystem` lays a pedestrian lane along that span at every node.
 
-The painted zebra is that lane's mesh, and a lane is drawn at `NetLaneData.m_Width` — `LaneSystem`
-defines `NodeLane.m_WidthOffset` as the *difference* between two lane prefabs' widths, which only
-means anything if that field is the width the lane is drawn at. Because a crossing lane runs across
-the road, its width is the depth of the band in the direction traffic travels.
+A crossing lane runs across the road, so its width is the depth of the painted band in the direction
+traffic travels. That width is two numbers added together:
 
-So one field covers both halves of what you want: more paint on the ground, and a wider strip for
-people to walk on. This mod rewrites that field on the crossing lane prefabs and lets the game's
-own lane pipeline do everything else — no geometry of its own, no Harmony patches.
+```
+NetLaneData.m_Width  +  NodeLane.m_WidthOffset
+```
 
-## One junction at a time
+and the two are read differently. `CreatureUtils.GetLaneOffset` takes the **sum**, which is what
+spreads the walkers out. `BatchDataHelpers.BuildCurveScale` returns the **ratio**
+`1 + m_WidthOffset / m_Width` and uses it as the mesh's lateral scale, which is what paints the
+zebra. Move only the prefab's `m_Width` and both terms shift together: the crossing behaves wider
+without ever looking it. **That is the mistake this mod made for several versions.**
 
-Press the crossing button in the row of mod buttons at the top left. Then:
+So width is applied **per crossing**, by writing `NodeLane.m_WidthOffset` on the lane the game laid.
+Note that field is not zero to begin with — `LaneSystem` writes `declaredWidth − variantWidth` into
+it to hold a theme variant at the width the composition declared — so the value written is
+`scale × laidWidth − variantWidth`, with `laidWidth` taken from the declaring placeholder. At 100%
+that reproduces the game's own number exactly, which is what makes "off", "restore" and "remove my
+data" the same code path as "apply".
 
-- **click a junction** to select it — each of its crossings is outlined at its actual width,
-- **point at a crossing** to make it live, then **drag out from it** to resize that crossing alone,
-  or use **−** and **+** in the panel,
-- **Same for all N crossings here** to make the junction uniform,
-- **Back to global** to forget that crossing's own width,
-- **right click** to drop the selection, right click again to leave the tool.
+No cloned prefabs, no shared prefab widths rewritten, no geometry of the mod's own, and no Harmony
+patches. The road itself never gets wider.
 
-Per-junction widths are saved with the city.
-
-The button needs the UI module built as well as the DLL — see [ui/README.md](ui/README.md). Without
-it the tool can still be started from the settings panel, but there is no panel to adjust it with.
-
-Under the hood a junction with its own width gets its crossing lanes pointed at a copy of the lane
-prefab carrying that width, since the global setting works by changing the shared prefab every
-junction uses. [NOTES.md](NOTES.md) has the details, including why it has to run after `LaneSystem`,
-and why the width buttons live in the panel rather than on a keyboard shortcut.
+Crossings through the middle are the one exception: those are lanes this mod creates. Nothing about
+them is invented — the entity comes from `NetLaneArchetypeData.m_NodeLaneArchetype`, and its path
+nodes, prefab, flags, signal and `NodeLane` are copied off crossings already standing at that
+junction, so the diagonal is an edge between two vertices already in the pedestrian graph and takes
+the same paint, width rules and green phase. They deliberately carry **no `Owner`**; see
+[NOTES.md](NOTES.md) for why that one detail is the difference between working and taking the game
+down.
 
 ## Applying it
 
-Crossings laid after you change the setting are correct immediately.
+Change the setting and the whole city follows on the next frame — crossings already standing
+included. There is nothing to press and nothing to reload.
 
-Crossings already standing were laid at the old width, and `LaneSystem` only revisits a node when
-something marks it updated. Two ways to deal with that:
+That is worth saying because it used to be false, and because the obvious mechanism is the wrong
+one. Width lives on lanes that are already laid, so applying it is a sweep that writes one number
+per crossing; it does **not** hand nodes back to `LaneSystem` to be laid again. The old route did,
+and it destroyed and rebuilt every lane at every junction in the city to change one number on each.
 
-- **Reload the save.** Everything is laid again from scratch. Always works.
-- **Press "Apply to existing crossings".** Hands every node and edge back to the lane pipeline in
-  one go. Faster, and it pauses the game for a moment on a large city.
+*Apply to existing crossings* therefore does nothing in normal use. It re-requests that sweep, which
+is worth having if a city ever ends up in a state where a crossing was missed.
 
-Unlike widening a road's cross-section, nothing about the road composition changes here — crossing
-width lives on the lane prefab, not in `NetCompositionCrosswalk`, which carries only the span and
-the lane reference. So this cannot leave a road half-rebuilt, and the road itself never gets wider.
+## Removing it
+
+**Maintenance → Remove this mod's data from the city**, then save. Every crossing goes back to the
+width its asset author chose, every per-junction width is forgotten, every crossing this mod added
+is taken out, and the mod switches itself off so nothing puts them back before you save. The save is
+then exactly as it would have been if the mod had never run.
+
+*Put every crossing back to normal* does the same to the city but leaves the mod switched on, so you
+can carry on from a city that looks untouched.
+
+## Compatibility
+
+Requires Cities: Skylines II **1.6**.
+
+Mods that add or remove crossings, or change where they sit, are fine: they work on the span and the
+composition, neither of which this mod touches. Anything else that writes `NodeLane.m_WidthOffset`
+on crossing lanes will conflict — last writer wins.
 
 ## Building
 
@@ -89,17 +116,22 @@ dotnet build CS2-CrosswalkWidth.sln -c Release
 ```
 
 The UI half is built separately with npm — see [ui/README.md](ui/README.md) for first-time setup.
-Both halves deploy into the same folder, and the project overrides the toolchain's `DeployWIP`
-target so that building one does not delete the other.
+**Both halves have to be built**, and a stale UI bundle beside a fresh DLL loads without complaint
+and silently behaves like the older version. Both deploy into the same folder, and the project
+overrides the toolchain's `DeployWIP` target so that building one does not delete the other.
 
-The toolchain's `DeployWIP` target copies the output into your local mods folder on build, so a
-Release build is enough to try it in game.
+`Properties/thumbnail.py` draws the store cover; `pip install cairosvg` first.
 
-## Compatibility
+## A note on the name
 
-Anything else that rewrites the same crossing lane prefabs will conflict — last writer wins.
-Mods that add or remove crossings, or change where they sit, are fine: they work on the span and
-the composition, which this mod does not touch.
+The assembly, the namespace and the settings key are all still `CrosswalkWidth`, and they stay that
+way on purpose. The settings key is what the game files a player's saved settings under, and the
+component type names are written into every city save that has used this mod — renaming them would
+reset one and break the other. Only the name players see is *Better Crosswalks*.
 
-Disabling the mod, or removing it, restores every authored width. That matters here because
-`NetLaneData` is serialized into the save.
+## Notes
+
+[NOTES.md](NOTES.md) is the record of what was expensive to learn: the unguarded indexing in
+`TrafficLightInitializationSystem` behind six crashes, why a lane index is two numbers rather than a
+counter, why a mod must never tag a node `Updated`, and the approaches that were tried and removed
+so they are not tried again.
