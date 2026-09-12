@@ -4,6 +4,21 @@
 kept because a good deal of it is the record of things that were got wrong first — and because the
 two save migrations in the code exist to clean up after those versions.
 
+## 1.0.1
+
+**The crossing tool is reachable again.** 1.0.0 went out without its toolbar button, and that button
+is the only way to open the tool — so every per-junction feature was unusable: selecting a junction,
+resizing one crossing, adding or removing crossings through the middle. The width settings were
+unaffected.
+
+`moduleRegistry.hasAppend(target)` reports whether something has *already been appended* to a target,
+not whether the target exists. This mod registers early, so the check read false and the
+registration was skipped. It depended on load order, which is why it survived testing and then did
+not. Replaced with a plain `append` in a `try`/`catch`. See NOTES.md.
+
+The listing also gains a fourth screenshot, of the tool, which could not be taken while the tool
+could not be opened.
+
 ## 1.0.0
 
 First public release: **Better Crosswalks**.

@@ -1,18 +1,18 @@
 <Publish>
   <!--
-    Read before publishing:
-      - ModId stays empty for the very first Publish. The publisher prints the id it assigns and
-        does NOT write it back, so paste it in by hand afterwards or the next NewVersion fails.
-      - The commands are Publish (creates the listing), NewVersion (uploads a build to an existing
-        listing) and Update (metadata only, cannot fix a bad build). There is no "New".
+    The listing exists (ModId 158875, first published 2026-09-12). From here on the command is
+    NewVersion, never Publish — Publish creates a second listing.
+
+      - Bump ModVersion and replace ChangeLog before every NewVersion. ChangeLog is published
+        verbatim against that version, so it holds only that version's notes; the full history
+        lives in CHANGELOG.md.
+      - Update changes metadata only and cannot fix a bad build.
       - GameVersion must match your installed build. Read it from the bottom of the main menu.
       - ShortDescription is rejected above 200 characters, not truncated.
-      - ChangeLog is published verbatim against this version. Keep it to this version's notes; the
-        full history lives in CHANGELOG.md.
       - Run the publisher from the CrosswalkWidth project directory: media paths resolve against the
         working directory.
   -->
-  <ModId Value="" />
+  <ModId Value="158875" />
   <DisplayName Value="Better Crosswalks" />
   <!-- 155 characters. -->
   <ShortDescription Value="Wider pedestrian crossings, shaped one junction at a time, plus diagonal crossings through the middle of a junction. Room for people to cross side by side." />
@@ -62,8 +62,9 @@ carriageway, and the painted zebra is that lane's mesh. This mod writes the widt
 the lanes the game lays, and lets the game's own lane pipeline do everything else. No geometry of
 its own, no Harmony patches, and the road itself never gets wider.
 
-Everything was worked out by decompiling and tracing the game's own assemblies, including a couple
-of defects found in them.
+Everything was worked out by decompiling and tracing the game's own assemblies. The full record —
+including the defects found in them, and the approaches that were tried and abandoned — is on the
+GitHub page.
 
 ## Applying it to a city you already have
 
@@ -83,35 +84,30 @@ have been if the mod had never run.
 
   <Screenshot Value="Properties/Screenshots/01-scramble-junction.jpg" />
   <Screenshot Value="Properties/Screenshots/02-wide-crossing.jpg" />
-  <Screenshot Value="Properties/Screenshots/04-settings.jpg" />
-  <!--
-    03-the-tool.jpg was captured before the 1.0.0 label fixes and still shows "Same for all
-    6crossings here" and the broken "Back to global" heading. Re-capture the tool panel from a
-    1.0.0 build, then uncomment this.
   <Screenshot Value="Properties/Screenshots/03-the-tool.jpg" />
-  -->
+  <Screenshot Value="Properties/Screenshots/04-settings.jpg" />
 
   <Tag Value="Code Mod" />
 
-  <ModVersion Value="1.0.0" />
+  <ForumLink Value="https://forum.paradoxplaza.com/forum/threads/better-crosswalks.1941286/" />
+
+  <ModVersion Value="1.0.1" />
   <GameVersion Value="1.6.*" />
 
-  <ChangeLog>First release.
+  <ChangeLog>The crossing tool is reachable again.
 
-Pedestrian crossings you can make wider, shape one at a time, and run corner to corner through the
-middle of a junction.
+1.0.0 shipped without its toolbar button. The button is the only way to open the crossing tool, so
+none of the per-junction editing could be used at all — clicking a junction, resizing one crossing,
+adding or removing crossings through the middle. The width settings were unaffected and worked
+throughout.
 
-- Crossing width as a percentage of the crossing's own, 25% to 400%, starting at 150%, with an
-  optional floor and ceiling in metres. The painted band and the strip people walk on widen
-  together.
-- A tool for one junction at a time. Click a junction, click a crossing, and drag its ends to set it
-  at an angle, its middle to slide it along the road, or its sides to resize it. Per-crossing
-  settings are saved with the city.
-- Crossings corner to corner through the middle of junctions where four or more roads meet, on by
-  default, editable and removable like any other crossing.
-- "Remove this mod's data from the city" puts everything back exactly as the game would have laid
-  it, for uninstalling cleanly.
+The cause was a check this mod made before registering the button, on an assumption about what it
+meant. It reported whether anything had already been added to that part of the interface, not
+whether that part of the interface existed, so the button was skipped depending on which other mods
+happened to load first.
+
+Nothing else changed. If 1.0.0 was doing what you wanted, this only adds the button back.
   </ChangeLog>
 
-  <ExternalLink Type="github" Url="" />
+  <ExternalLink Type="github" Url="https://github.com/Meapy/CS2-BetterCrosswalks" />
 </Publish>

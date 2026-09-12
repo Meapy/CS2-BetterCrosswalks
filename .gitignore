@@ -55,3 +55,4 @@ nunit-*.xml
 /ui/node_modules
 *.pid
 /images
+CrosswalkWidth/Library/ilpp.pid
