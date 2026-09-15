@@ -1,7 +1,10 @@
+using System.Collections.Generic;
 using Colossal.IO.AssetDatabase;
 using CrosswalkWidth.Systems;
 using Game.Modding;
 using Game.Settings;
+using Game.UI.Localization;
+using Game.UI.Widgets;
 
 namespace CrosswalkWidth
 {
@@ -59,6 +62,71 @@ namespace CrosswalkWidth
         /// </summary>
         [SettingsUISection(SectionMain, GroupWidth)]
         public bool EnableMiddleCrossings { get; set; } = true;
+
+        /// <summary>
+        /// A line down either side of the zebra stripes — the border a "ladder" crossing has.
+        ///
+        /// Off out of the box. It is a change to how every crossing in the city looks, and unlike
+        /// the width it is a matter of taste rather than of the crossing working better, so nobody
+        /// gets it without asking.
+        ///
+        /// Turning it on or off hands the city's roads back to the game to be laid again, because a
+        /// junction reads the crossing lane prefab once, when it is laid, and never again.
+        /// </summary>
+        [SettingsUISection(SectionMain, GroupWidth)]
+        public bool EdgeLines { get; set; } = false;
+
+        /// <summary>
+        /// Which of the game's painted markings the lines are drawn with.
+        ///
+        /// Automatic picks the closest thing the game already has to a crossing's border — a stop
+        /// line — and prefers one gated behind the same theme as the crossing itself, so a North
+        /// American city gets the North American one. The list is here because that choice is made
+        /// from prefab data rather than from anything a player can see, and a marking gated behind
+        /// the wrong theme is refused by the game with nothing said about it: if the lines do not
+        /// appear, this is the way out without a new build.
+        /// </summary>
+        [SettingsUIDropdown(typeof(CrosswalkWidthSetting), nameof(GetEdgeLineStyles))]
+        [SettingsUISection(SectionMain, GroupWidth)]
+        public string EdgeLineStyle { get; set; } = Systems.CrosswalkLineCatalog.kAutomatic;
+
+        /// <summary>
+        /// The markings that could serve, for the dropdown above.
+        ///
+        /// Static, and reached through <see cref="Mod.LineCatalog"/>, because this is how the game
+        /// asks for a dropdown's contents and it hands nothing in. Empty before the prefabs load,
+        /// which is why "Automatic" is always first and is what the setting defaults to.
+        /// </summary>
+        public static DropdownItem<string>[] GetEdgeLineStyles()
+        {
+            List<DropdownItem<string>> items = new List<DropdownItem<string>>
+            {
+                new DropdownItem<string>
+                {
+                    value = Systems.CrosswalkLineCatalog.kAutomatic,
+                    displayName = LocalizedString.Value("Automatic")
+                }
+            };
+
+            Systems.CrosswalkLineCatalog catalog = Mod.LineCatalog;
+
+            if (catalog != null)
+            {
+                IReadOnlyList<Systems.CrosswalkLineCatalog.Candidate> candidates = catalog.Candidates;
+
+                for (int i = 0; i < candidates.Count; i++)
+                {
+                    items.Add(new DropdownItem<string>
+                    {
+                        value = candidates[i].m_Name,
+                        displayName = LocalizedString.Value(
+                            $"{candidates[i].m_Name} ({candidates[i].m_Width:0.00}m)")
+                    });
+                }
+            }
+
+            return items.ToArray();
+        }
 
         /// <summary>Floor in metres, applied after the percentage. 0 disables it.</summary>
         [SettingsUISlider(min = 0f, max = 12f, step = 0.5f, unit = "floatSingleFraction")]
@@ -141,12 +209,14 @@ namespace CrosswalkWidth
         /// single comparison whether it needs to write to the prefabs again.
         /// </summary>
         public string Signature =>
-            $"{Enabled}|{WidthPercentage}|{MinimumWidth}|{MaximumWidth}";
+            $"{Enabled}|{WidthPercentage}|{MinimumWidth}|{MaximumWidth}|{EdgeLines}|{EdgeLineStyle}";
 
         public override void SetDefaults()
         {
             Enabled = true;
             EnableMiddleCrossings = true;
+            EdgeLines = false;
+            EdgeLineStyle = CrosswalkLineCatalog.kAutomatic;
             WidthPercentage = 150;
             MinimumWidth = 0f;
             MaximumWidth = 0f;

@@ -14,15 +14,15 @@
   -->
   <ModId Value="158875" />
   <DisplayName Value="Better Crosswalks" />
-  <!-- 155 characters. -->
-  <ShortDescription Value="Wider pedestrian crossings, shaped one junction at a time, plus diagonal crossings through the middle of a junction. Room for people to cross side by side." />
+  <!-- 179 characters. Rejected above 200, not truncated. -->
+  <ShortDescription Value="Wider pedestrian crossings, shaped one junction at a time, with a painted line down either side, plus diagonal crossings through the middle. Room for people to cross side by side." />
 
   <LongDescription># Better Crosswalks
 
 A crossing in Cities: Skylines II is a thin painted band that a queue of citizens shuffles across in
 single file. This mod widens the band and the strip people walk on together, so a crowd spreads out
-across it instead of filing over — and it lets you shape crossings one at a time, or run them corner
-to corner through the middle of a junction.
+across it instead of filing over — and it lets you shape crossings one at a time, give them a painted
+border, or run them corner to corner through the middle of a junction.
 
 ## Width
 
@@ -55,6 +55,23 @@ scramble crossing, the kind Shibuya is known for. They are on by default, and th
 removes them like any other crossing. Turn them off in settings and any already in the city are
 cleared out.
 
+## Lines down the sides
+
+A solid line either side of the zebra stripes, so the crossing reads as a bordered band rather than
+a row of loose bars. The lines sit on the edge of the band and follow it, so a crossing you widen
+takes its borders with it.
+
+Off out of the box, because it changes how every crossing in the city looks. The lines are the game's
+own road markings, laid by the game's own marking system, so they match whatever your roads are
+already painted with and nothing goes into your save. They appear only where the game paints a
+crossing — never on the unmarked ones, and never where there is no pavement to step onto, which is
+what a bridge usually has. A "Line style" dropdown picks between the markings found if the automatic
+choice is not the one you want. Crossings through the middle of a junction get lines too.
+
+One thing to know: the game lays these lines when it builds a junction and saves them with your city,
+so a junction keeps the lines it was built with. On a city you already have, press
+"Apply to existing crossings and lines" once.
+
 ## How it works
 
 A crossing is not part of the road's cross-section. It is a pedestrian lane laid across the
@@ -68,9 +85,12 @@ GitHub page.
 
 ## Applying it to a city you already have
 
-Nothing to do. Change the setting and every crossing in the city follows immediately, including the
-ones already standing. "Apply to existing crossings" is there for the rare case where one gets
-missed.
+Widths need nothing done. Change the setting and every crossing in the city follows immediately,
+including the ones already standing.
+
+The lines are the exception, because the game lays those when it builds a junction and saves them
+with your city. Press "Apply to existing crossings and lines" once and every road is handed back to
+the game to be laid again, lines and all. Expect a pause on a large city.
 
 ## Removing it
 
@@ -91,22 +111,35 @@ have been if the mod had never run.
 
   <ForumLink Value="https://forum.paradoxplaza.com/forum/threads/better-crosswalks.1941286/" />
 
-  <ModVersion Value="1.0.1" />
+  <ModVersion Value="1.1.0" />
   <GameVersion Value="1.6.*" />
 
-  <ChangeLog>The crossing tool is reachable again.
+  <ChangeLog>Lines down the sides of a crossing.
 
-1.0.0 shipped without its toolbar button. The button is the only way to open the crossing tool, so
-none of the per-junction editing could be used at all — clicking a junction, resizing one crossing,
-adding or removing crossings through the middle. The width settings were unaffected and worked
-throughout.
+A new setting paints a solid line either side of the zebra stripes, so a crossing reads as a bordered
+band rather than a row of loose bars. The lines sit on the edge of the painted band and follow it, so
+a crossing you widen — with the slider or with the tool — takes its borders with it. Crossings
+through the middle of a junction get them too.
 
-The cause was a check this mod made before registering the button, on an assumption about what it
-meant. It reported whether anything had already been added to that part of the interface, not
-whether that part of the interface existed, so the button was skipped depending on which other mods
-happened to load first.
+It is off out of the box. It changes how every crossing in the city looks, and unlike the width it is
+a matter of taste rather than of the crossing working better.
 
-Nothing else changed. If 1.0.0 was doing what you wanted, this only adds the button back.
+The lines are the game's own road markings, laid by the game's own marking system, so they are the
+paint your city's roads already use and nothing is added to your save. They appear only where the
+game paints a crossing: never on the unmarked ones it lays at every junction, and never where there
+is no pavement to step onto, which is what a bridge usually has. A "Line style" dropdown picks
+between the markings found, for the case where the automatic choice is not the one you want.
+
+The game lays these lines when it builds a junction and saves them with your city, so a junction
+keeps the lines it was built with. On a city you already have, press "Apply to existing crossings and
+lines" once — every road is handed back to the game to be laid again. Expect a pause on a large city.
+
+Also fixed: crossings through the middle of a junction built from divided roads ran to the median
+instead of to the far corner. A road with a median is crossed in two spans rather than one, and the
+mod was reading each span as a separate arm of the junction. This changes how many middle crossings
+such a junction has, so a width or a position you set by hand on one of them there starts again.
+
+Widths, the crossing tool and everything else are unchanged.
   </ChangeLog>
 
   <ExternalLink Type="github" Url="https://github.com/Meapy/CS2-BetterCrosswalks" />

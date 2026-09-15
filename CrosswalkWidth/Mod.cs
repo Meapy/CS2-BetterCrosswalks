@@ -24,6 +24,15 @@ namespace CrosswalkWidth
         /// </summary>
         internal static Systems.CrosswalkCatalog Catalog { get; set; }
 
+        /// <summary>
+        /// The markings found that could draw a line down either side of a crossing.
+        ///
+        /// Shared for the same reason the crossing catalogue is, and for one more: the settings
+        /// dropdown that lets the player pick between them is a static method on the settings class,
+        /// with no route to a system.
+        /// </summary>
+        internal static Systems.CrosswalkLineCatalog LineCatalog { get; set; }
+
         /// <summary>The assembly version, so a log or a bug report says which build it came from.</summary>
         public static string Version =>
             System.Reflection.Assembly.GetExecutingAssembly().GetName().Version.ToString(3);
@@ -54,6 +63,23 @@ namespace CrosswalkWidth
             // all three later in the same frame.
             updateSystem.UpdateAfter<CrosswalkScrambleSystem, CrosswalkOverrideSystem>(
                 SystemUpdatePhase.Modification4);
+
+            // And a second time, immediately before SecondaryLaneSystem, which is what lays the
+            // lines down a crossing's sides.
+            //
+            // The width pass has to have run before it or the lines come out at the width the
+            // crossing was laid at rather than the width this mod wants. In Modification4 it cannot
+            // have: LaneSystem writes its new lanes through ModificationBarrier4, which plays back
+            // at the *end* of that phase, so a junction's fresh crossings do not exist yet when the
+            // pass above runs — it picks them up a frame later, by which time the lines are laid and
+            // the junction is no longer tagged for the game to lay them again.
+            //
+            // Here they do exist, LaneReferencesSystem has already put them in their junction's lane
+            // list, and nothing has drawn anything yet. The pass costs nothing when there is no work
+            // — it collects an empty list and returns — and every write it makes is a comparison
+            // first, so running it twice in a frame cannot do anything twice.
+            updateSystem.UpdateBefore<CrosswalkOverrideSystem, Game.Net.SecondaryLaneSystem>(
+                SystemUpdatePhase.Modification4B);
 
             // Tools live in their own phase, alongside the game's.
             updateSystem.UpdateAt<CrosswalkPickerToolSystem>(SystemUpdatePhase.ToolUpdate);
