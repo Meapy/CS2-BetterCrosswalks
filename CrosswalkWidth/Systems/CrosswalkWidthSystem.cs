@@ -30,6 +30,7 @@ namespace CrosswalkWidth.Systems
         private static bool s_ResetRequested;
 
         private CrosswalkCatalog m_Catalog;
+        private CrosswalkLineCatalog m_LineCatalog;
         private PrefabSystem m_PrefabSystem;
         private CrosswalkOverrideSystem m_OverrideSystem;
 
@@ -38,9 +39,31 @@ namespace CrosswalkWidth.Systems
         private EntityQuery m_CrossingPieceQuery;
         private EntityQuery m_PieceLaneQuery;
         private EntityQuery m_CompositionCrosswalkQuery;
+        private EntityQuery m_MarkingHostQuery;
         private EntityQuery m_NetQuery;
 
         private string m_AppliedSignature;
+
+        /// <summary>
+        /// What the side lines were last written as, so a change can be told from a repeat.
+        ///
+        /// Turning them on or off changes what the game lays at a junction, and a junction is only
+        /// laid again when something asks for it — so the change has to be followed by handing the
+        /// city's roads back to the pipeline. That is expensive, and doing it when nothing has
+        /// actually changed would make every unrelated settings change pause the game.
+        /// </summary>
+        private string m_AppliedLineStyle;
+
+        /// <summary>
+        /// The width settings the side lines were last laid against.
+        ///
+        /// The lines are laid from the crossing's width by the game, once, when the junction is
+        /// laid. So a change to the global width moves every crossing in the city and leaves every
+        /// line where it was — and the only way to catch them up is to hand the roads back. Watched
+        /// separately from the rest of the signature so that a setting with nothing to do with
+        /// width, the tool's step size say, does not lay a city again for nothing.
+        /// </summary>
+        private string m_AppliedLineWidths;
 
 
 
@@ -85,6 +108,9 @@ namespace CrosswalkWidth.Systems
             m_Catalog = new CrosswalkCatalog();
             Mod.Catalog = m_Catalog;
 
+            m_LineCatalog = new CrosswalkLineCatalog();
+            Mod.LineCatalog = m_LineCatalog;
+
             m_PrefabSystem = World.GetOrCreateSystemManaged<PrefabSystem>();
             m_Catalog.PrefabSystem = m_PrefabSystem;
             m_OverrideSystem = World.GetOrCreateSystemManaged<CrosswalkOverrideSystem>();
@@ -99,6 +125,11 @@ namespace CrosswalkWidth.Systems
             // Compositions carry the crossing lane the game actually lays, which is not always the
             // one the piece declared.
             m_CompositionCrosswalkQuery = GetEntityQuery(ComponentType.ReadOnly<NetCompositionCrosswalk>());
+
+            // Every lane prefab that names a painted marking to be laid beside or across it. That
+            // buffer is the only place the game's own markings can be found, since prefab names
+            // live inside the .cok archives.
+            m_MarkingHostQuery = GetEntityQuery(ComponentType.ReadOnly<SecondaryNetLane>());
 
             m_NetQuery = GetEntityQuery(new EntityQueryDesc
             {
@@ -124,7 +155,7 @@ namespace CrosswalkWidth.Systems
         {
             base.OnGameLoadingComplete(purpose, mode);
 
-            DiscoverAndApply();
+            DiscoverAndApply(mayRelay: false);
 
             // Before anything else touches the city: put right any crossing left pointing at a
             // prefab the game does not know. The pre-release versions that cloned lane prefabs
@@ -188,6 +219,20 @@ namespace CrosswalkWidth.Systems
                 int scrambles = m_ScrambleSystem.RemoveAll();
                 int cleared = m_OverrideSystem.PurgeFromCity();
 
+                // The side lines go here rather than being left to the settings change below,
+                // because the whole promise of this button is that the city is clean the moment it
+                // returns. The re-lay that takes them off the crossings already standing comes with
+                // the settings change on the next update.
+                settings.EdgeLines = false;
+                m_AppliedLineStyle = null;
+
+                if (m_LineCatalog.Restore(EntityManager) > 0)
+                {
+                    // The lines a crossing is already carrying were laid from the prefab when its
+                    // junction last was; taking the entry out does not reach back to them.
+                    RelayNets();
+                }
+
                 Mod.Log.Info(
                     $"{Mod.ModName}: removed this mod's data from the city — {cleared} junction "
                     + $"widths forgotten, {scrambles} junctions' middle crossings taken out, every "
@@ -199,7 +244,7 @@ namespace CrosswalkWidth.Systems
             {
                 // Crossings laid after this point pick it up immediately. Ones already standing do
                 // not, until the button below is pressed or the save is reloaded.
-                DiscoverAndApply();
+                DiscoverAndApply(mayRelay: true);
             }
 
             if (s_DumpRequested)
@@ -232,6 +277,14 @@ namespace CrosswalkWidth.Systems
                 {
                     m_Catalog.Restore(EntityManager);
                 }
+
+                // The entry naming the side lines goes too. It reaches no save either, but a
+                // session that carries on without this mod should have the game's own prefabs back
+                // exactly as the game built them.
+                if (m_LineCatalog != null)
+                {
+                    m_LineCatalog.Restore(EntityManager);
+                }
             }
             catch (System.Exception e)
             {
@@ -243,7 +296,17 @@ namespace CrosswalkWidth.Systems
             base.OnDestroy();
         }
 
-        private void DiscoverAndApply()
+        /// <summary>
+        /// <paramref name="mayRelay"/> allows the city's roads to be handed back to the lane
+        /// pipeline if the side lines have been turned on or off, which is the only way a junction
+        /// already standing picks the change up.
+        ///
+        /// False on the load path on purpose. A city loads by laying every lane in it, and the
+        /// prefabs were written at the main menu, before that — so the crossings come out of the
+        /// load already right, and re-laying them would be a whole city's work for no change. It is
+        /// also the worst possible moment to ask for one (see NOTES.md, "do nothing during a load").
+        /// </summary>
+        private void DiscoverAndApply(bool mayRelay)
         {
             CrosswalkWidthSetting settings = Mod.Settings;
 
@@ -271,6 +334,8 @@ namespace CrosswalkWidth.Systems
             // session; those writes never reached a save, but they do outlive a mod restart.
             m_Catalog.Restore(EntityManager);
 
+            ApplyEdgeLines(settings, mayRelay);
+
             m_OverrideSystem.RequestFullPass();
 
             Mod.Log.Info(
@@ -278,6 +343,79 @@ namespace CrosswalkWidth.Systems
                     ? $"{Mod.ModName}: {settings.WidthPercentage}% over {m_Catalog.LaneCount} crossing lane "
                         + $"prefabs named by {m_Catalog.CrossingPieceCount} crossing pieces"
                     : $"{Mod.ModName}: disabled, {m_Catalog.LaneCount} crossing lanes back to authored width");
+        }
+
+        /// <summary>
+        /// Puts the lines down either side of the zebra stripes in, or takes them out.
+        ///
+        /// The work is one entry written into each crossing lane prefab; everything after that is
+        /// the game's own — see CrosswalkLineCatalog. What is left here is only deciding when a
+        /// junction already standing has to be laid again to notice, which is whenever the answer
+        /// has changed from what was last written.
+        /// </summary>
+        private void ApplyEdgeLines(CrosswalkWidthSetting settings, bool mayRelay)
+        {
+            bool wanted = settings.Enabled && settings.EdgeLines;
+            string style = wanted ? settings.EdgeLineStyle ?? CrosswalkLineCatalog.kAutomatic : null;
+
+            string widths =
+                $"{settings.Enabled}|{settings.WidthPercentage}|{settings.MinimumWidth}|{settings.MaximumWidth}";
+
+            bool widthsMoved = wanted && widths != m_AppliedLineWidths;
+
+            m_AppliedLineWidths = widths;
+
+            // This runs on every settings change, most of which have nothing to do with the lines.
+            // Only a change of answer is worth a line in the log or a whole city laid again, and
+            // "what was asked for" is the comparison — a failure to deliver it is reported once, at
+            // the moment it is asked for, rather than on every slider afterwards.
+            bool changed = style != m_AppliedLineStyle;
+
+            if (wanted)
+            {
+                // PaintedLanePrefabs, not LanePrefabs. The catalogue also holds the "may not walk
+                // here" substitutes, because they are laid where a crossing would be and have to be
+                // sized like one — but they paint no stripes, so bordering them draws two lines
+                // across a road with nothing between them.
+                int written = m_LineCatalog.Apply(EntityManager, m_Catalog.PaintedLanePrefabs, style);
+
+                if (changed)
+                {
+                    Mod.Log.Info(
+                        written > 0
+                            ? $"{Mod.ModName}: lines down either side of the zebra stripes on "
+                                + $"{written} crossing lane prefabs, drawn with "
+                                + m_LineCatalog.AppliedNames
+                            : $"{Mod.ModName}: no marking the game lays could serve as a crossing's "
+                                + "side lines, so none were added — \"List crossings in the log\" "
+                                + "says what was considered");
+                }
+            }
+            else
+            {
+                int cleared = m_LineCatalog.Restore(EntityManager);
+
+                if (cleared > 0)
+                {
+                    Mod.Log.Info(
+                        $"{Mod.ModName}: side lines taken off {cleared} crossing lane prefabs");
+                }
+            }
+
+            if (!changed && !widthsMoved)
+            {
+                return;
+            }
+
+            m_AppliedLineStyle = style;
+
+            // A crossing already standing has the lines the game gave it when its junction was last
+            // laid, and nothing re-reads the prefab in between. This is the one change in this mod
+            // that really does need the city handed back.
+            if (mayRelay)
+            {
+                RelayNets();
+            }
         }
 
 
@@ -299,8 +437,15 @@ namespace CrosswalkWidth.Systems
             settings.WidthPercentage = 100;
             settings.MinimumWidth = 0f;
             settings.MaximumWidth = 0f;
+            settings.EdgeLines = false;
 
             m_Catalog.Restore(EntityManager);
+
+            // "Back where the game lays it" includes the lines down the sides, which the game does
+            // not lay. The re-lay below is what takes them off the crossings already standing.
+            m_LineCatalog.Restore(EntityManager);
+            m_AppliedLineStyle = null;
+
             m_OverrideSystem.RequestFullPass();
 
             RelayNets();
@@ -359,6 +504,20 @@ namespace CrosswalkWidth.Systems
                 }
             }
 
+            if (!m_MarkingHostQuery.IsEmptyIgnoreFilter)
+            {
+                NativeArray<Entity> hosts = m_MarkingHostQuery.ToEntityArray(Allocator.Temp);
+
+                try
+                {
+                    m_LineCatalog.Discover(EntityManager, m_PrefabSystem, hosts);
+                }
+                finally
+                {
+                    hosts.Dispose();
+                }
+            }
+
             if (m_PieceLaneQuery.IsEmptyIgnoreFilter)
             {
                 return;
@@ -377,12 +536,22 @@ namespace CrosswalkWidth.Systems
         }
 
         /// <summary>
-        /// Checks every crossing in the city against the current settings.
+        /// Checks every crossing in the city against the current settings, and — if the side lines
+        /// are on — hands the roads back so the game lays those again too.
         ///
-        /// The name is left over from when this did hand every node and edge back to the lane
-        /// pipeline. It does not any more, and the button it sits behind is close to redundant: a
-        /// settings change already requests this same sweep. It stays because a sweep on demand
-        /// costs nothing and is the obvious thing to reach for if a crossing is ever missed.
+        /// The second half is what the button is really for now. A crossing's width lives on the
+        /// crossing, so a sweep is enough to put that right. The lines beside it do not: they are
+        /// separate lanes that the game laid once, from the prefab as it stood at the time, and
+        /// **they are saved with the city**. So a city carries whatever lines it was laid with until
+        /// each junction is laid again — which is why a build that changes where the lines belong
+        /// appears to do nothing on a city that already has them, while a junction the player
+        /// happens to edit comes out right.
+        ///
+        /// That is the same trap as NOTES.md, "a lane the mod saved is a lane an old version wrote",
+        /// with the twist that these lanes are the game's rather than this mod's: nothing here can
+        /// find them, and nothing here should try. Handing the roads back is the whole remedy, and
+        /// it belongs on a button rather than on load — a whole city re-laid without being asked for
+        /// is exactly the automatic tidying that once made a save unopenable.
         /// </summary>
         private void RelayCrossings()
         {
@@ -398,6 +567,19 @@ namespace CrosswalkWidth.Systems
             // city to change one number on each crossing.
             m_OverrideSystem.RequestFullPass();
 
+            CrosswalkWidthSetting settings = Mod.Settings;
+
+            if (settings != null && settings.Enabled && settings.EdgeLines)
+            {
+                RelayNets();
+
+                Mod.Log.Info(
+                    $"{Mod.ModName}: re-checking every crossing in the city, and laying the lines "
+                    + "down their sides again");
+
+                return;
+            }
+
             Mod.Log.Info($"{Mod.ModName}: re-checking every crossing in the city");
         }
 
@@ -406,6 +588,29 @@ namespace CrosswalkWidth.Systems
             foreach (string line in m_Catalog.Describe(EntityManager, NameOf))
             {
                 Mod.Log.Info($"{Mod.ModName}: {line}");
+            }
+
+            // Listed whether or not the side lines are switched on. When they are and nothing is
+            // drawn, this is the list to read: a marking gated behind a theme the city is not using
+            // is refused by the game silently, and the style setting is how to pick another.
+            foreach (string line in m_LineCatalog.Describe())
+            {
+                Mod.Log.Info($"{Mod.ModName}: {line}");
+            }
+
+            // And what is actually standing in the city, which is the only thing that settles a
+            // crossing drawing no stripes. The prefab lists above say what the mod found; this says
+            // what the game did with it.
+            try
+            {
+                foreach (string line in m_OverrideSystem.DescribeLaidCrossings())
+                {
+                    Mod.Log.Info($"{Mod.ModName}: {line}");
+                }
+            }
+            catch (System.Exception e)
+            {
+                Mod.Log.Warn($"{Mod.ModName}: could not list the crossings in the city: {e.Message}");
             }
         }
 

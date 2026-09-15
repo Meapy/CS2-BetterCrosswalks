@@ -64,6 +64,17 @@ namespace CrosswalkWidth.Systems
         private const float kMaxShift = 12f;
 
         /// <summary>
+        /// Passes between one re-lay of a junction's side lines and the next.
+        ///
+        /// Counted in passes rather than frames, because this system runs twice in a frame — once in
+        /// Modification4 and once in Modification4B, ahead of the system that lays the lines. So
+        /// this is about a fifth of a second, which is slow enough that dragging a crossing wider
+        /// does not rebuild the junction on every frame and fast enough that the lines visibly
+        /// follow while it is happening.
+        /// </summary>
+        private const int kRelayCooldown = 24;
+
+        /// <summary>
         /// Where the numbering of this mod's own crossings starts, above the junction's real ones.
         ///
         /// A width or a position set by hand is stored against a number. The junction's own
@@ -128,8 +139,23 @@ namespace CrosswalkWidth.Systems
         private readonly Dictionary<Entity, List<Entity>> m_OrderCache =
             new Dictionary<Entity, List<Entity>>();
 
+        /// <summary>
+        /// Junctions whose side lines no longer match their crossings, waiting to be handed back to
+        /// the game so it lays them again. Always empty while the lines are switched off.
+        /// </summary>
+        private readonly HashSet<Entity> m_StaleLines = new HashSet<Entity>();
+
+        /// <summary>When each junction was last handed back for its lines, in passes.</summary>
+        private readonly Dictionary<Entity, int> m_LastRelaid = new Dictionary<Entity, int>();
+
+        /// <summary>Scratch: junctions dealt with this pass, taken off the list after the walk.</summary>
+        private readonly List<Entity> m_Relaid = new List<Entity>();
+
         private bool m_FullPassPending = true;
         private int m_LastReportedCount = -1;
+
+        /// <summary>Passes since the system started, for the re-lay cooldown.</summary>
+        private int m_Pass;
 
         /// <summary>
         /// Set if this system has thrown. It then does nothing for the rest of the session.
@@ -217,6 +243,72 @@ namespace CrosswalkWidth.Systems
         }
 
         /// <summary>
+        /// What the crossings standing in this city actually are, grouped by lane prefab, as lines
+        /// for the game log.
+        ///
+        /// Here because the question "why is there a line across this road with nothing between it"
+        /// has exactly one answer per prefab, and no way to get at it from a screenshot. A crossing
+        /// lane is laid at every junction whether or not anybody asked for a painted crossing; what
+        /// separates a crossing you can see from one you cannot is <c>PedestrianLaneFlags.Unsafe</c>
+        /// and whether the prefab has a mesh at all. Both are in here, against the prefab's name and
+        /// against whether this mod is bordering it.
+        /// </summary>
+        public IEnumerable<string> DescribeLaidCrossings()
+        {
+            if (m_AllCrossingQuery.IsEmptyIgnoreFilter)
+            {
+                yield return "no crossings laid — no city loaded, most likely";
+                yield break;
+            }
+
+            Dictionary<Entity, int3> tally = new Dictionary<Entity, int3>();
+
+            NativeArray<Entity> lanes = m_AllCrossingQuery.ToEntityArray(Allocator.Temp);
+
+            try
+            {
+                for (int i = 0; i < lanes.Length; i++)
+                {
+                    Entity prefab = EntityManager.GetComponentData<PrefabRef>(lanes[i]).m_Prefab;
+                    PedestrianLaneFlags flags =
+                        EntityManager.GetComponentData<Game.Net.PedestrianLane>(lanes[i]).m_Flags;
+
+                    tally.TryGetValue(prefab, out int3 counts);
+
+                    counts.x++;
+                    counts.y += (flags & PedestrianLaneFlags.Crosswalk) != 0 ? 1 : 0;
+                    counts.z += (flags & PedestrianLaneFlags.Unsafe) != 0 ? 1 : 0;
+
+                    tally[prefab] = counts;
+                }
+            }
+            finally
+            {
+                lanes.Dispose();
+            }
+
+            yield return $"{tally.Count} lane prefabs behind the pedestrian lanes standing in this city";
+
+            foreach (KeyValuePair<Entity, int3> entry in tally)
+            {
+                bool hasMesh = EntityManager.HasBuffer<SubMesh>(entry.Key)
+                    && EntityManager.GetBuffer<SubMesh>(entry.Key, true).Length != 0;
+
+                bool bordered = EntityManager.HasBuffer<SecondaryNetLane>(entry.Key)
+                    && EntityManager.GetBuffer<SecondaryNetLane>(entry.Key, true).Length != 0;
+
+                string name = m_PrefabSystem.TryGetPrefab<PrefabBase>(entry.Key, out PrefabBase managed)
+                    && managed != null
+                        ? managed.name
+                        : entry.Key.ToString();
+
+                yield return $"  {name}: {entry.Value.x} laid, {entry.Value.y} marked Crosswalk, "
+                    + $"{entry.Value.z} marked Unsafe, {(hasMesh ? "has paint" : "NO PAINT")}"
+                    + (bordered ? ", side lines written" : string.Empty);
+            }
+        }
+
+        /// <summary>
         /// Asks for every crossing in the city to be revisited on the next update.
         ///
         /// Used where the answer can have changed everywhere at once — a save finishing loading,
@@ -233,6 +325,95 @@ namespace CrosswalkWidth.Systems
             if (node != Entity.Null)
             {
                 m_PendingNodes.Add(node);
+                NoteLinesStale(node);
+            }
+        }
+
+        /// <summary>
+        /// Notes that this junction's side lines no longer match its crossings.
+        ///
+        /// A crossing's width lives on the crossing, but the lines beside it are laid from that
+        /// width by <c>SecondaryLaneSystem</c> — once, when the junction is laid, and never again
+        /// until it is laid once more. Widening a crossing afterwards therefore moves the band and
+        /// leaves the lines where they were.
+        ///
+        /// So the junction has to be handed back to the game. That is normally a thing this mod must
+        /// never do (see NOTES.md, "never tag the node Updated"), and it is safe here for one
+        /// reason: this is reached only from the calls the *player* makes — the tool's setters and
+        /// its buttons — never from anything a re-lay causes. A re-lay does not put a junction back
+        /// on this list, so there is no cycle to get stuck in.
+        ///
+        /// Nothing is done when the lines are switched off, which is the default: then a crossing's
+        /// width reaches the paint on its own and re-laying the junction would be pure cost.
+        /// </summary>
+        private void NoteLinesStale(Entity node)
+        {
+            CrosswalkWidthSetting settings = Mod.Settings;
+
+            if (node == Entity.Null || settings == null || !settings.Enabled || !settings.EdgeLines)
+            {
+                return;
+            }
+
+            m_StaleLines.Add(node);
+        }
+
+        /// <summary>
+        /// Hands back the junctions whose side lines are out of date, no more often than the
+        /// cooldown allows.
+        ///
+        /// The cooldown is what makes this usable while a crossing is being dragged. The tool calls
+        /// its setter on every frame the button is held, so without one a junction would be torn
+        /// down and rebuilt sixty times a second — every lane at it destroyed and re-created, and
+        /// the pedestrian graph churned with it. A junction that is still cooling is left on the
+        /// list rather than dropped, so the width the drag finishes on is always the one the lines
+        /// are finally laid at.
+        /// </summary>
+        private void RelayStaleLines()
+        {
+            if (m_StaleLines.Count == 0)
+            {
+                return;
+            }
+
+            m_Relaid.Clear();
+
+            foreach (Entity node in m_StaleLines)
+            {
+                if (node == Entity.Null
+                    || !EntityManager.Exists(node)
+                    || !EntityManager.HasComponent<Game.Net.Node>(node)
+                    || EntityManager.HasComponent<Deleted>(node)
+                    || EntityManager.HasComponent<Temp>(node))
+                {
+                    m_Relaid.Add(node);
+                    continue;
+                }
+
+                if (m_LastRelaid.TryGetValue(node, out int last) && m_Pass - last < kRelayCooldown)
+                {
+                    continue;
+                }
+
+                m_LastRelaid[node] = m_Pass;
+                m_Relaid.Add(node);
+
+                if (!EntityManager.HasComponent<Updated>(node))
+                {
+                    EntityManager.AddComponent<Updated>(node);
+                }
+            }
+
+            for (int i = 0; i < m_Relaid.Count; i++)
+            {
+                m_StaleLines.Remove(m_Relaid[i]);
+            }
+
+            // Junctions come and go; nothing reads a stale entry, but the map would grow for the
+            // rest of the session without this.
+            if (m_LastRelaid.Count > 1024)
+            {
+                m_LastRelaid.Clear();
             }
         }
 
@@ -380,9 +561,12 @@ namespace CrosswalkWidth.Systems
                 return;
             }
 
+            m_Pass++;
+
             try
             {
                 Apply();
+                RelayStaleLines();
             }
             catch (System.Exception e)
             {

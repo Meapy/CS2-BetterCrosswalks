@@ -676,6 +676,46 @@ have to stay loose — a tidy four-way's opposite corners are 180 degrees apart,
 nearer 115 and a lopsided four-way's around 130, and a threshold tight enough to look clever starts
 refusing junctions that are perfectly fine.
 
+## A road with a median is crossed twice, and the corner between them is not a corner
+
+"It goes from the corner to the median, not to the other corner of the junction." That is the whole
+bug, and the cause is one step further back than the corners.
+
+`NetCompositionSystem.AddCompositionCrosswalks` merges crossing spans that are **adjacent** in the
+composition. A median piece that declares no crossing breaks the run, so a divided road's mouth
+carries two `NetCompositionCrosswalk` entries, one per carriageway, and `LaneSystem` lays two
+crossings across it rather than one.
+
+Everything downstream counts crossings and believes each one is an arm. Eight crossings at a four-arm
+junction of divided roads become eight corners — and four of those eight are the "corner" between an
+arm's own two halves, which sits on the median. Pairing each corner with the one half way round the
+ring then runs a diagonal from a real corner of the junction to the middle of a road.
+
+The counting itself is right; see "corners are counted, not measured" for why measuring them is not
+an option. What was missing is that the thing being counted was not what it was assumed to be.
+
+The two halves are put back together before the corners are built, and recognised without measuring
+anything against the junction:
+
+- they run the same way, because both cross the same road;
+- the line between their midpoints runs **along** that same direction, because one carries on where
+  the other stopped.
+
+The second test is what makes it safe, and it is worth being explicit about what it rejects. Two
+crossings on **opposite** arms of a straight road are just as parallel — but the line between their
+midpoints runs along the road, square to the direction they cross in, so they are left alone. Same
+for the two crossings either side of a side street at a T junction. Only a road's own two halves have
+both properties.
+
+The joined crossing spans the outermost of the four ends and takes its path nodes from them, so a
+corner built from it still lands on a place that is already in the pedestrian graph — which is the
+property the whole feature rests on.
+
+One consequence worth knowing: joining changes how many corners a junction has, and a middle
+crossing's number is its corner's. A junction of divided roads that had four diagonals numbered 0 to
+3 now has two numbered 0 and 1, so a width or a position set by hand on one of them does not survive
+the change. There is no way round that — the old numbers described corners that were never there.
+
 ## A junction is not flat, and a diagonal is long enough to notice
 
 A road is crowned: its centre sits higher than its kerbs. A junction is two crowns meeting, so the
@@ -815,3 +855,305 @@ still logs rather than failing silently — which was the whole point of the gua
 
 The general form: a guard that has to be right about an undocumented API is not a safety net, it is
 a second thing that can fail, and it fails closed.
+
+## The lines down a crossing's sides are prefab data, not lanes this mod lays
+
+The obvious way to border a crossing is to build the border: two thin lanes down its edges, laid the
+way the middle crossings are laid, tracked by a component of this mod's, cleared when the junction is
+rebuilt. That was most of a design before the game turned out to have the whole thing already.
+
+`SecondaryLaneSystem` lays every painted marking in the game — lane dividers, stop lines, give-way
+lines — from two pieces of prefab data and nothing else:
+
+- `SecondaryLaneData` on the **marking** prefab says how it is placed.
+- a `SecondaryNetLane` buffer on the **host** lane prefab names the markings that lane gets.
+
+Then, for a host lane with nothing alongside it:
+
+```csharp
+curve = NetUtils.OffsetCurveLeftSmooth(curve2.m_Bezier, leftWidth * -0.5f - secondaryLaneData.m_CutOffset);
+```
+
+— the marking is laid along the lane's edge. And `leftWidth` comes from
+
+```csharp
+float2 width = netLaneData.m_Width;
+if (m_NodeLaneData.TryGetComponent(subLane, out var componentData)) { width += componentData.m_WidthOffset; }
+```
+
+which is exactly the pair of numbers this mod's width pass writes. So one buffer entry on each
+crossing lane prefab gets lines down either side of every crossing in the city, at the right width,
+following the band as it is widened, in the city's own paint, created and destroyed with their
+junction by the game. No component of this mod's, no lane creation, no save data, nothing to migrate.
+
+Prefab entities are excluded from the save (see "prefab writes do not reach a city save"), so the
+entry is a session-lifetime change, put back on shutdown.
+
+### The relationship runs the other way round from how it reads
+
+`SecondaryLane` is a `ComponentMenu("Net/")` component on a `NetLanePrefab` with fields called
+`m_LeftLanes`, `m_RightLanes` and `m_CrossingLanes`. Every instinct says it belongs on a road lane
+and lists the markings that lane gets. It is the opposite. `NetInitializeSystem`:
+
+```csharp
+Entity entity = nativeArray[num11];                                   // the prefab holding SecondaryLane
+value9.m_Flags |= LaneFlags.Secondary;                                // ... is itself the marking
+Entity entity2 = m_PrefabSystem.GetEntity(secondaryLaneInfo.m_Lane);  // ... and m_Lane is the host
+base.EntityManager.GetBuffer<SecondaryNetLane>(entity2).Add(new SecondaryNetLane
+{
+    m_Lane = entity,
+    m_Flags = flags
+});
+```
+
+So `SecondaryLane` sits on the *marking* and lists the lanes it wants to be drawn beside. The buffer
+the game reads at lay-out time is the inverted index built from that, on the host. A mod adding a
+marking to a lane writes the buffer, never the component.
+
+### `OneSided` is a requirement, and it is the one that matters here
+
+`SecondaryLaneSystem.UpdateLanes` offers every lane to the matching twice, once per side, and the
+side is `Left` or `Right`. An entry carrying both is matched by both, which is how one entry becomes
+a line on either side.
+
+`OneSided` is the subtle one. When the lane has a neighbour alongside it, `OneSided` goes into the
+set of flags an entry must **not** have; when it has none, into the set it must have:
+
+```csharp
+if (laneCorner2.m_Lane != Entity.Null) { secondaryNetLaneFlags  |= OneSided; }   // forbidden
+else                                   { secondaryNetLaneFlags3 |= OneSided; }   // required
+```
+
+A crossing runs across the road with nothing beside it, so the entry has to carry `OneSided` or it
+matches nothing and no line is ever drawn. Carrying it also means the rare crossing that *does* find
+a neighbour falls back to the shared marking the game draws between any two lanes, rather than two
+lines butted together.
+
+### Which marking, and the three ways the wrong one fails
+
+Not every marking will do, and none of the refusals shows up as an error:
+
+- **No `SecondaryLaneData`.** `CreateSecondaryLane` reads it through an unguarded `ComponentLookup`
+  inside a Burst job. Naming a prefab that has not got it takes the process down with no stacktrace —
+  this mod's oldest failure mode wearing another hat.
+- **A non-zero `SecondaryLaneData.m_Flags`.** The skip flags mean "cut this marking wherever the lane
+  it borders overlaps traffic". Right for a lane divider, ruinous here: a crossing overlaps every car
+  lane it crosses, so the line would be cut away to almost nothing. `GetCutRanges` returns
+  immediately when the flags are zero, so zero is the test.
+- **A non-zero `m_Spacing`.** That marking is not a line along the lane but a row of pieces laid
+  *between two* lane curves at intervals — `NetUtils.StraightCurve(Position(curve2, t),
+  Position(curve3, t))`. With one lane there is no second curve, only a default `Curve` at the
+  origin.
+
+What is left is ranked by what the game already uses it for, which is readable from the flags in the
+buffer. `Crossing | RequireStop` is a stop line: one solid bar laid straight across a lane, the right
+orientation and the right length for a crossing's border, and the automatic choice.
+
+### A marking gated behind the wrong theme is refused silently
+
+`CheckRequirements` compares the marking's `ObjectRequirementElement` groups against the city's theme
+and refuses it if they do not match. Nothing is logged; the marking is simply laid nowhere.
+
+Crossing lanes are themed the same way — "NA Crosswalk Lane 2" for the placeholder "Crosswalk Lane 2"
+— so the choice is made per crossing lane prefab rather than once for the city: prefer a marking
+gated behind something this crossing is gated behind too, since whichever theme lays the crossing
+lays that marking with it. Failing that, one with no requirements, which is always allowed.
+
+**Inferred, not measured.** Which markings are themed, and whether the same requirement entity
+appears on both a crossing and its marking, was not read out of a running game. So the setting is a
+dropdown of everything found rather than a switch, and the log dump lists every candidate with its
+thickness, its role flags and whether it is gated. If the lines do not appear, those two together say
+why without needing a new build.
+
+### A crossing lane is laid at every junction; the paint is what is conditional
+
+Two lines across a road with nothing between them, in the middle of a dual carriageway, was the first
+thing this feature got wrong in game. `LaneSystem` lays a crossing lane at every junction whether or
+not the road asked for a painted crossing, and marks the ones nobody painted:
+
+```csharp
+if (isCrosswalk)
+{
+    component3.m_Flags |= PedestrianLaneFlags.Crosswalk;
+    if ((startCompositionData.m_Flags.m_General & CompositionFlags.General.Crosswalk) == 0)
+    {
+        if ((startCompositionData.m_Flags.m_General & CompositionFlags.General.DeadEnd) != 0) { return; }
+        component3.m_Flags |= PedestrianLaneFlags.Unsafe;
+        hasSignals = false;
+    }
+```
+
+`PedestrianLaneFlags.Crosswalk` therefore does **not** mean "there is a zebra here" — it is on the
+unmarked ones too. `Unsafe` is the one that means "no paint": `BatchInstanceSystem` turns it into
+`RequireSafe` and skips every sub-mesh carrying it, which is how an unmarked crossing draws nothing
+at all.
+
+So the entry carries `SecondaryNetLaneFlags.RequireSafe`, which `SecondaryLaneSystem` puts into what
+a corner *forbids* when its lane is unsafe. One flag, and the lines are drawn only where the stripes
+are.
+
+Worth generalising: this mod's width pass has always worked on `Crosswalk` lanes without caring
+whether they are painted, because widening an invisible band is invisible. Anything that *adds*
+paint has to ask the second question as well.
+
+### The catalogue holds lanes that are not crossings, and they must not be bordered
+
+`RequireSafe` fixed it on ordinary roads and not on bridges, which says the remaining ones are not
+`Unsafe` at all — they are lanes that draw no stripes for a different reason.
+
+The catalogue holds one such kind on purpose. `PedestrianLaneData.m_NotWalkLanePrefab` is the lane
+the game substitutes where a pedestrian lane meets something a citizen may not step onto — a
+carriageway with no pavement beside it, which is what a bridge or an elevated road usually is. It is
+in the catalogue because it is laid where a crossing would be and has to be **sized** like one, or a
+narrow band is left butted against a wide one. It is emphatically not a crossing: it paints nothing,
+and nothing about it should be decorated.
+
+So `CrosswalkCatalog` now tells the two apart — `m_IsDeclaredCrossing` against `m_IsNotWalkVariant`,
+with "a real crossing anywhere" winning, since one road family's crossing lane can be another's
+substitute — and exposes `PaintedLanePrefabs` alongside `LanePrefabs`. Width uses all of them; the
+side lines use only the painted ones. The log dump marks the difference.
+
+The general shape, and it is one this mod keeps meeting: **a set assembled for one purpose is not
+automatically the right set for the next one.** The catalogue was built to answer "what has to be
+sized", and "what may be decorated" is a strictly smaller question.
+
+### The lines are saved with the city, so a fix does not reach the city that has them
+
+"If I place a crosswalk and remove it, they disappear" is the whole diagnosis in one sentence, and it
+names the last trap in this feature.
+
+`SecondaryLaneSystem`'s markings are ordinary lanes owned by their junction, and they go into the
+save like every other lane. They are laid **once**, from the prefab as it stood when the junction was
+laid, and nothing re-reads the prefab afterwards. So a build that changes where the lines belong
+changes nothing about a city that already has them: every junction keeps the lines it was built with
+until something rebuilds it, and placing a crosswalk and removing it is exactly such a rebuild.
+
+Which means two builds in a row looked like they had not worked when both were correct. The evidence
+for "the filter is wrong" and the evidence for "the filter is right and the city is stale" are the
+same screenshot.
+
+This is NOTES.md's own rule — "if a mod persists something it generates, decide how a later version
+replaces it" — arriving in a form that is easy to miss, because the lanes are **the game's**, not this
+mod's. Nothing here created them, nothing here can find them, and nothing here should try: they carry
+no marker of this mod's, and sweeping lanes by prefab across a whole city is precisely the automatic
+tidying that once made a save unopenable.
+
+The remedy is the one the game already has. "Apply to existing crossings" now hands every road back to
+the pipeline when the lines are on, which re-lays them against the prefab as it now stands. On a
+button, and never on load: a whole city re-laid without being asked for is the thing that rule exists
+to prevent.
+
+The general form, worth keeping: **when a mod's change is carried out by the game, the mod's state
+and the city's state are different things, and only the game can reconcile them.** Ask whether a
+fix reaches a city that was built by the build before it — and if it cannot, put the reconciliation
+somewhere the player chooses.
+
+### Naming the crossings actually standing in the city
+
+Three rounds of this feature have been debugged from screenshots, and a screenshot cannot say whether
+a crossing is `Unsafe`, which prefab it came from, or whether that prefab has a mesh. So
+`DescribeLaidCrossings` walks every pedestrian lane in the city, groups them by prefab, and writes
+out — per prefab — how many are laid, how many are marked `Crosswalk`, how many `Unsafe`, whether the
+prefab has any `SubMesh` at all, and whether this mod has written side lines into it. It hangs off
+the existing "List crossings in the log" button.
+
+That is the difference between "the paint is off for this reason" and a fourth guess: a prefab
+showing `NO PAINT` with side lines written is the answer on its own.
+
+### The lines are laid from the width, once, before this mod has written it
+
+The second thing it got wrong in game: the lines came out at the crossing's authored width and stayed
+there while the band around them was widened.
+
+`SecondaryLaneSystem` reads the width the right way —
+
+```csharp
+float2 width = netLaneData.m_Width;
+if (m_NodeLaneData.TryGetComponent(subLane, out var componentData)) { width += componentData.m_WidthOffset; }
+```
+
+— but it reads it at the wrong moment. `LaneSystem` creates a junction's lanes through
+`ModificationBarrier4`, which plays back at the **end** of Modification4. So when this mod's width
+pass ran, also in Modification4, the junction's fresh crossings did not exist yet; it picked them up
+a frame later. By then `SecondaryLaneSystem` had already laid the lines, in Modification4B of the
+frame before, from the width `LaneSystem` gave them — and the junction was no longer tagged `Updated`,
+so nothing would ever lay them again.
+
+The fix is ordering, not code: `CrosswalkOverrideSystem` is registered a second time, in
+Modification4B, immediately before `SecondaryLaneSystem`. There the barrier has played back, the new
+lanes exist, `LaneReferencesSystem` has already put them in their junction's lane list, and nothing
+has been drawn yet. It costs nothing when there is no work — an empty list and a return — and every
+write it makes is a comparison first, so running twice in a frame cannot do anything twice.
+
+Two things fall out of it, both improvements on their own account: a widened crossing now reaches the
+paint in the frame its junction is laid rather than the frame after, and the sub-lane order the
+per-crossing widths are keyed by is read after `LaneReferencesSystem` rather than before it.
+
+### Widening a crossing afterwards means handing the junction back
+
+Ordering fixes the junction being laid. It does not fix the tool: dragging one crossing wider writes
+`NodeLane` and tags the lane `BatchesUpdated`, which redraws the band and never touches the lines,
+because `SecondaryLaneSystem` only visits owners carrying `Updated`.
+
+There is no way round handing the junction back, and "never tag the node `Updated`" is a rule this
+mod has for good reason — it is an unbreakable loop when the thing that causes the tag is also a
+thing the re-lay recreates. What makes it safe here is where the tag comes from: `RequestNode` is
+called from the tool's setters and its buttons and from nowhere else. Nothing a re-lay does puts a
+junction back on the list, so there is no cycle.
+
+The cooldown is the other half. The tool calls its setter on every frame the drag button is held, so
+without one a junction would be torn down and rebuilt sixty times a second, its whole pedestrian
+graph with it. A junction still cooling is **left on the list rather than dropped**, which is what
+makes the width a drag finishes on the one the lines are finally laid at.
+
+And when the lines are switched off — the default — none of this happens at all. The list is never
+added to, and a crossing's width reaches the paint on its own as it always did.
+
+### A junction reads the crossing lane prefab once
+
+Turning this on or off changes what `SecondaryLaneSystem` lays, and it lays anything only at an owner
+carrying `Updated`. Nothing re-reads the prefab for a junction already standing. So this is the one
+setting in the mod that genuinely needs the city handed back to the pipeline — `RelayNets`, the same
+call the reset button makes — and it fires only when the answer has actually changed, because
+`DiscoverAndApply` runs on every settings change and most of them have nothing to do with lines.
+
+The load path passes `mayRelay: false` for the same reason everything else here holds off during a
+load: the prefabs are written at the main menu, before the city is laid, so a city loads with its
+lines already on and there is nothing to re-lay for.
+
+### The middle crossings need their lines laid by hand
+
+A lane this mod adds deliberately has no `Owner`, so it is in no junction's `SubLane` buffer — and
+`SecondaryLaneSystem` finds lanes by walking that buffer. The diagonals are invisible to it, and were
+drawn without borders while every crossing around them had one, which at a scramble junction is the
+most conspicuous place in the city for an inconsistency to sit.
+
+Giving them an `Owner` to fix that is exactly the change that crashed the game repeatedly (see "a
+junction's lane list is indexed by number"), so the lines are laid by hand instead. It is the design
+this feature was built to avoid, and it is only tolerable here because
+`CrosswalkScrambleSystem` already has every piece of it: creating a lane from an archetype, marking
+it `CrosswalkAdded` and `CrosswalkJunction` so every path that clears a junction's middle crossings
+clears its lines with them, and sweeping what is left over.
+
+Three things are worth writing down.
+
+**The offset is the game's, not a guess.** `MoveEdgeLine` reproduces
+`SecondaryLaneSystem.CreateSecondaryLane` exactly — `OffsetCurveLeftSmooth(curve, width * -0.5f -
+cutOffset)`, then the `m_PositionOffset` correction, with the width read as
+`NetLaneData.m_Width + NodeLane.m_WidthOffset` — so a line beside a middle crossing sits where a line
+beside any other crossing sits. Anything else would be visibly out by a few centimetres next to the
+game's own.
+
+**They are recomputed every pass, not laid once.** This is the one place where the mod can do better
+than the game does: the game's lines are laid with the junction and never looked at again, which is
+why widening a crossing needs the junction handed back. These are worked out from the crossing's
+current curve and width on every pass, so a middle crossing dragged wider or slid along the road
+takes its lines with it immediately. Every write is absolute, from the crossing as it stands, so
+there is nothing to drift.
+
+**A line is not a crossing, and three places have to know it.** `CountLiveLanes` must not count one,
+or "this junction still has its crossings" is satisfied by a line whose crossing has already gone.
+The override system's `m_AddedCrossingQuery` must not return one, or the tool offers it as a crossing
+to select — that one is free, because the query already requires `NodeLane` and a marking lane has
+none. And the pass that lays missing lines must skip lanes that are themselves lines, since they
+carry the same two marker components.

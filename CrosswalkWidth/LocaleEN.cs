@@ -99,6 +99,43 @@ namespace CrosswalkWidth
                     + "off also clears any that are already in the city, a few at a time."
                 },
                 {
+                    m_Setting.GetOptionLabelLocaleID(nameof(CrosswalkWidthSetting.EdgeLines)),
+                    "Lines down the sides"
+                },
+                {
+                    m_Setting.GetOptionDescLocaleID(nameof(CrosswalkWidthSetting.EdgeLines)),
+                    "Paints a solid line down either side of the zebra stripes, so the crossing "
+                    + "reads as a bordered band rather than a row of loose bars. The lines sit on "
+                    + "the edge of the band and follow it, so a crossing you widen takes its "
+                    + "borders with it.\n\n"
+                    + "The lines are the game's own road markings, laid by the game's own marking "
+                    + "system — except on the crossings this mod adds through the middle, which it "
+                    + "lays itself — so they match whatever the city's roads are painted with. They "
+                    + "are drawn only where the game paints a crossing — never on the unmarked ones, "
+                    + "and never where there is no pavement to step onto, which is what a bridge "
+                    + "or an elevated road usually has. Crossings through the middle of a junction "
+                    + "get them too, and theirs follow the moment you resize one.\n\n"
+                    + "Changing this, or the width above, hands the city's roads back to the game "
+                    + "to be laid again, which takes a moment on a large city — and so does "
+                    + "resizing a crossing with the tool, for that one junction."
+                },
+
+                {
+                    m_Setting.GetOptionLabelLocaleID(nameof(CrosswalkWidthSetting.EdgeLineStyle)),
+                    "Line style"
+                },
+                {
+                    m_Setting.GetOptionDescLocaleID(nameof(CrosswalkWidthSetting.EdgeLineStyle)),
+                    "Which marking the lines are drawn with. Automatic takes the closest thing the "
+                    + "game already has — a stop line — and prefers one belonging to the same theme "
+                    + "as the crossing itself.\n\n"
+                    + "Pick one by hand if the lines do not appear or do not look right. A marking "
+                    + "belonging to a theme your city is not using is refused by the game without "
+                    + "saying so, and \"List crossings in the log\" writes out everything found "
+                    + "here, with its thickness and what the game itself uses it for."
+                },
+
+                {
                     m_Setting.GetOptionLabelLocaleID(nameof(CrosswalkWidthSetting.ToolStepPercentage)),
                     "Tool step size"
                 },
@@ -116,14 +153,19 @@ namespace CrosswalkWidth
 
                 {
                     m_Setting.GetOptionLabelLocaleID(nameof(CrosswalkWidthSetting.ApplyToExistingCrossings)),
-                    "Apply to existing crossings"
+                    "Apply to existing crossings and lines"
                 },
                 {
                     m_Setting.GetOptionDescLocaleID(nameof(CrosswalkWidthSetting.ApplyToExistingCrossings)),
-                    "Checks every crossing in the city against the current settings.\n\n" +
-                    "You should not need this: a change to any setting above is applied to the " +
-                    "whole city straight away, crossings already standing included. It is here for " +
-                    "the rare case where one gets missed."
+                    "Checks every crossing in the city against the current settings, and lays the " +
+                    "lines down their sides again.\n\n" +
+                    "A crossing's width reaches the whole city the moment you change it, so you " +
+                    "should not need this for that. The lines are different: they are laid by the " +
+                    "game when a junction is built and they are saved with your city, so a junction " +
+                    "keeps the lines it was built with until something rebuilds it. Press this " +
+                    "after updating the mod, or if a line is somewhere it should not be.\n\n" +
+                    "Expect a pause on a large city: every road is handed back to the game to be " +
+                    "laid again."
                 },
 
                 {
@@ -151,7 +193,12 @@ namespace CrosswalkWidth
                 {
                     m_Setting.GetOptionDescLocaleID(nameof(CrosswalkWidthSetting.LogDiscoveredCrossings)),
                     "Writes every crossing lane the mod found, its width before and after, and which " +
-                    "road pieces use it, to the game log. Use this if a junction looks untouched."
+                    "road pieces use it, to the game log. Use this if a junction looks untouched.\n\n" +
+                    "It also lists the markings that could draw lines down a crossing's sides, and " +
+                    "every pedestrian lane standing in the city grouped by what it was drawn from — " +
+                    "how many are marked crossings, how many are not, and whether each has any " +
+                    "paint at all. That is the list to read if a line turns up somewhere it should " +
+                    "not."
                 }
             };
         }

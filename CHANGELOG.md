@@ -4,6 +4,61 @@
 kept because a good deal of it is the record of things that were got wrong first — and because the
 two save migrations in the code exist to clean up after those versions.
 
+## 1.1.0
+
+**Lines down the sides of a crossing.** A new setting paints a solid line either side of the zebra
+stripes, so a crossing reads as a bordered band rather than a row of loose bars. The lines sit on the
+edge of the painted band and follow it, so a crossing you widen — with the slider or with the tool —
+takes its borders with it.
+
+Off out of the box. It changes how every crossing in the city looks, and unlike the width it is a
+matter of taste rather than of the crossing working better.
+
+Nothing here is drawn by this mod. The lines are the game's own road markings, laid by the game's own
+marking system, so they are the paint the city's roads already use and they are created and destroyed
+with their junction like every other marking. The whole feature is one entry written onto each
+crossing lane prefab, and prefabs are not saved with a city, so a save gains nothing it would not
+have had anyway.
+
+They appear only where the game paints a zebra. A junction is given a crossing lane whether or not
+anybody asked for a crossing on it, and the unasked-for ones draw nothing; so is the lane the game
+substitutes where there is no pavement to step onto, which is what a bridge or an elevated road
+usually has. Without both of those exclusions the mod put two lines across a road with nothing
+between them. The line itself is a thin solid one rather than a stop line's bar.
+
+A **Line style** dropdown picks between the markings found, for the case where the automatic choice
+is not the one you want — a marking belonging to a theme your city is not using is refused by the
+game without saying so.
+
+**Crossings through the middle get lines too.** They could not at first: the game lays lines by
+walking each junction's lane list, and these crossings are deliberately kept out of it, which is what
+stopped them crashing the game. So the mod lays theirs itself, at the offset the game uses, and works
+them out afresh every pass. That last part makes them better behaved than the game's own — drag a
+middle crossing wider and its lines follow at once, with no junction rebuild.
+
+**"Apply to existing crossings" is now "Apply to existing crossings and lines"** and hands every road
+back to the game when the lines are on. The game's lines are laid when a junction is built and are
+saved with the city, so a junction keeps the lines it was built with until something rebuilds it.
+Press it once after updating to bring a city you already have up to date; expect a pause on a large
+one.
+
+**Crossings through the middle of a junction built from divided roads now reach the far corner.** A
+road with a median is not crossed in one span — the median breaks the run, so the game lays two
+crossings across that road's mouth rather than one. Everything downstream counted crossings and
+believed each one was an arm, so a four-arm junction of divided roads was read as having eight
+corners, four of them sitting on a median, and a crossing then ran from a real corner to the middle of
+a road. The two halves of a road's mouth are now put back together before the corners are worked out.
+
+One thing to expect from that: it changes how many crossings through the middle such a junction has,
+and their numbering with it, so a width or a position set by hand on one of them there does not
+survive the change. The old numbers described corners that were never there.
+
+**"List crossings in the log" says considerably more.** It now also writes out every marking that
+could serve as a crossing's border, with its thickness and what the game itself uses it for, and
+every pedestrian lane prefab standing in the city — how many of its lanes are marked crossings, how
+many are not, whether it has any paint at all, and whether this mod has bordered it. That is the list
+to read if a line ever turns up somewhere it should not.
+
 ## 1.0.1
 
 **The crossing tool is reachable again.** 1.0.0 went out without its toolbar button, and that button
