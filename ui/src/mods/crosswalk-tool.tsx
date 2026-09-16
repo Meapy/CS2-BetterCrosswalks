@@ -19,6 +19,7 @@ const crossingCount$ = bindValue<number>(GROUP, "crossingCount", 0);
 const canScramble$ = bindValue<boolean>(GROUP, "canScramble", false);
 const hasScramble$ = bindValue<boolean>(GROUP, "hasScramble", false);
 const canRemove$ = bindValue<boolean>(GROUP, "canRemove", false);
+const paintHidden$ = bindValue<boolean>(GROUP, "paintHidden", false);
 
 /**
  * The toolbar button, and the small panel that appears beside it while the tool is running.
@@ -45,6 +46,7 @@ export function CrosswalkToolButton(): JSX.Element {
   const canScramble = useValue(canScramble$);
   const hasScramble = useValue(hasScramble$);
   const canRemove = useValue(canRemove$);
+  const paintHidden = useValue(paintHidden$);
 
   return (
     <>
@@ -78,6 +80,10 @@ export function CrosswalkToolButton(): JSX.Element {
 
               <button className={styles.secondary} onClick={() => trigger(GROUP, "applyToJunction")}>
                 {`Same for all ${crossingCount} crossings here`}
+              </button>
+
+              <button className={styles.secondary} onClick={() => trigger(GROUP, "toggleHidePaint")}>
+                {paintHidden ? "Show crossing paint" : "Hide crossing paint"}
               </button>
 
               {canScramble && (

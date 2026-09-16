@@ -32,6 +32,7 @@ namespace CrosswalkWidth.Systems
         private ValueBinding<bool> m_CanScramble;
         private ValueBinding<bool> m_HasScramble;
         private ValueBinding<bool> m_CanRemove;
+        private ValueBinding<bool> m_PaintHidden;
 
         protected override void OnCreate()
         {
@@ -49,6 +50,7 @@ namespace CrosswalkWidth.Systems
             AddBinding(m_CanScramble = new ValueBinding<bool>(kGroup, "canScramble", false));
             AddBinding(m_HasScramble = new ValueBinding<bool>(kGroup, "hasScramble", false));
             AddBinding(m_CanRemove = new ValueBinding<bool>(kGroup, "canRemove", false));
+            AddBinding(m_PaintHidden = new ValueBinding<bool>(kGroup, "paintHidden", false));
 
             AddBinding(new TriggerBinding(kGroup, "toggleTool", ToggleTool));
             AddBinding(new TriggerBinding(kGroup, "widen", () => m_PickerTool.AdjustSelected(1)));
@@ -58,6 +60,7 @@ namespace CrosswalkWidth.Systems
             AddBinding(new TriggerBinding(kGroup, "applyToJunction", m_PickerTool.ApplyToWholeJunction));
             AddBinding(new TriggerBinding(kGroup, "toggleScramble", m_PickerTool.ToggleScramble));
             AddBinding(new TriggerBinding(kGroup, "removeSelected", m_PickerTool.RemoveSelected));
+            AddBinding(new TriggerBinding(kGroup, "toggleHidePaint", m_PickerTool.ToggleHidePaint));
         }
 
         protected override void OnUpdate()
@@ -78,6 +81,7 @@ namespace CrosswalkWidth.Systems
             bool onJunction = active && m_PickerTool.selectedNode != Unity.Entities.Entity.Null;
 
             m_CanRemove.Update(hasSelection && m_PickerTool.selectedIsAdded);
+            m_PaintHidden.Update(hasSelection && m_PickerTool.selectedPaintHidden);
             m_CanScramble.Update(onJunction && m_PickerTool.canScramble);
             m_HasScramble.Update(onJunction && m_PickerTool.hasScramble);
             m_CrossingCount.Update(m_PickerTool.crossingCount);
