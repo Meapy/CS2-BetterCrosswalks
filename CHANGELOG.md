@@ -4,6 +4,22 @@
 kept because a good deal of it is the record of things that were got wrong first — and because the
 two save migrations in the code exist to clean up after those versions.
 
+## 1.2.0
+
+**Hide a crossing's paint.** The crossing tool's panel has a new button, *Hide crossing paint*, that
+stops the selected crossing being drawn — the zebra and the lines down its sides — while leaving it a
+crossing in every other respect. People still cross there, its signals still run, and it keeps its
+width and its position; the rings stay on it so it can still be found and edited. *Show crossing
+paint*, or *Reset this crossing*, brings it back. Works on crossings through the middle too, and is
+saved with the city.
+
+Nothing about the lane is removed to do it. The paint is clipped away with the same cut the game
+itself uses to stop a crossing's paint running into the pavement, which only the renderer reads.
+
+One thing to know about saves: this adds a field to the per-crossing settings stored with a city, so
+a city saved with this version, where any crossing has been widened, moved or hidden with the tool,
+cannot be opened again with 1.1.0 or earlier.
+
 ## 1.1.0
 
 **Lines down the sides of a crossing.** A new setting paints a solid line either side of the zebra

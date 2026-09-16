@@ -121,6 +121,9 @@ namespace CrosswalkWidth.Systems
         /// <summary>Crossing lanes this mod laid, which no junction's sub-lane order contains.</summary>
         private EntityQuery m_AddedCrossingQuery;
 
+        /// <summary>Markings carrying a cut, for taking this mod's hiding back off them all.</summary>
+        private EntityQuery m_CutMarkingQuery;
+
         private readonly List<Entity> m_CrossingLanes = new List<Entity>();
 
         /// <summary>Junctions the tool has just edited; their crossings are revisited next update.</summary>
@@ -144,6 +147,14 @@ namespace CrosswalkWidth.Systems
         /// the game so it lays them again. Always empty while the lines are switched off.
         /// </summary>
         private readonly HashSet<Entity> m_StaleLines = new HashSet<Entity>();
+
+        /// <summary>Junctions whose side lines are to be matched to their crossings, and the pass each was noted on.</summary>
+        private readonly Dictionary<Entity, int> m_MarkingNodes = new Dictionary<Entity, int>();
+
+        private readonly List<Entity> m_MarkingDone = new List<Entity>();
+        private readonly List<Entity> m_MarkingCrossings = new List<Entity>();
+        private readonly List<Entity> m_MarkingLines = new List<Entity>();
+        private readonly List<Entity> m_PaintScratch = new List<Entity>();
 
         /// <summary>When each junction was last handed back for its lines, in passes.</summary>
         private readonly Dictionary<Entity, int> m_LastRelaid = new Dictionary<Entity, int>();
@@ -200,6 +211,20 @@ namespace CrosswalkWidth.Systems
                     ComponentType.ReadWrite<NodeLane>(),
                     ComponentType.ReadOnly<PrefabRef>(),
                     ComponentType.ReadOnly<Updated>()
+                },
+                None = new[]
+                {
+                    ComponentType.ReadOnly<Deleted>(),
+                    ComponentType.ReadOnly<Temp>()
+                }
+            });
+
+            m_CutMarkingQuery = GetEntityQuery(new EntityQueryDesc
+            {
+                All = new[]
+                {
+                    ComponentType.ReadOnly<Game.Net.SecondaryLane>(),
+                    ComponentType.ReadOnly<CutRange>()
                 },
                 None = new[]
                 {
@@ -356,6 +381,414 @@ namespace CrosswalkWidth.Systems
             }
 
             m_StaleLines.Add(node);
+        }
+
+        /// <summary>True if the player has asked for this crossing not to be drawn.</summary>
+        public bool GetHidePaint(Entity node, int index)
+        {
+            if (node == Entity.Null
+                || index < 0
+                || !EntityManager.Exists(node)
+                || !EntityManager.HasBuffer<CrosswalkLaneOverride>(node))
+            {
+                return false;
+            }
+
+            DynamicBuffer<CrosswalkLaneOverride> overrides =
+                EntityManager.GetBuffer<CrosswalkLaneOverride>(node, true);
+
+            for (int i = 0; i < overrides.Length; i++)
+            {
+                if (overrides[i].m_Index == index)
+                {
+                    return overrides[i].m_HidePaint;
+                }
+            }
+
+            return false;
+        }
+
+        /// <summary>
+        /// Stops one crossing being drawn, or starts drawing it again.
+        ///
+        /// Only a record is made here. This is called from the panel, during the UI phase, and the
+        /// lane itself is only touched by this system's own pass — which runs after LaneSystem has
+        /// laid the junction, and again just before the game lays its markings.
+        ///
+        /// Stored beside the crossing's width and position, and dropped the same way they are once
+        /// all three are back to nothing, so a crossing that is only hidden keeps an entry and one
+        /// that is shown again with nothing else set does not.
+        /// </summary>
+        public void SetHidePaint(Entity node, int index, bool hide)
+        {
+            if (node == Entity.Null || index < 0 || !EntityManager.Exists(node))
+            {
+                return;
+            }
+
+            if (!EntityManager.HasBuffer<CrosswalkLaneOverride>(node))
+            {
+                if (!hide)
+                {
+                    return;
+                }
+
+                EntityManager.AddBuffer<CrosswalkLaneOverride>(node);
+            }
+            else
+            {
+                PruneOverrides(node);
+            }
+
+            // Pruning can take the buffer away again if every entry in it was stale.
+            if (!EntityManager.HasBuffer<CrosswalkLaneOverride>(node))
+            {
+                if (!hide)
+                {
+                    return;
+                }
+
+                EntityManager.AddBuffer<CrosswalkLaneOverride>(node);
+            }
+
+            DynamicBuffer<CrosswalkLaneOverride> overrides =
+                EntityManager.GetBuffer<CrosswalkLaneOverride>(node);
+
+            for (int i = 0; i < overrides.Length; i++)
+            {
+                if (overrides[i].m_Index != index)
+                {
+                    continue;
+                }
+
+                CrosswalkLaneOverride entry = overrides[i];
+
+                entry.m_Version = CrosswalkLaneOverride.kCurrentVersion;
+                entry.m_HidePaint = hide;
+
+                if (entry.IsEmpty)
+                {
+                    overrides[i] = entry;
+                    RestoreNode(node);
+
+                    overrides = EntityManager.GetBuffer<CrosswalkLaneOverride>(node);
+                    overrides.RemoveAt(i);
+
+                    if (overrides.Length == 0)
+                    {
+                        EntityManager.RemoveComponent<CrosswalkLaneOverride>(node);
+                    }
+                }
+                else
+                {
+                    overrides[i] = entry;
+                }
+
+                RequestPaint(node, index);
+                return;
+            }
+
+            if (hide)
+            {
+                overrides.Add(new CrosswalkLaneOverride
+                {
+                    m_Version = CrosswalkLaneOverride.kCurrentVersion,
+                    m_Index = index,
+                    m_HidePaint = true
+                });
+
+                RequestPaint(node, index);
+            }
+        }
+
+        /// <summary>
+        /// Queues the crossing a paint change applies to.
+        ///
+        /// Not RequestNode. That also hands the junction back to the game when the side lines are on,
+        /// and hiding a crossing does not need its junction laid again — only its lines brought into
+        /// line, which SyncMarkings does without rebuilding anything.
+        /// </summary>
+        private void RequestPaint(Entity node, int index)
+        {
+            m_PendingNodes.Add(node);
+
+            if (index < kAddedIndexBase)
+            {
+                return;
+            }
+
+            // A middle crossing is not in the junction's lane list, so a request for the junction
+            // never reaches it. It has to be asked for by name.
+            m_PaintScratch.Clear();
+            AppendAddedLanes(node, m_PaintScratch);
+
+            for (int i = 0; i < m_PaintScratch.Count; i++)
+            {
+                if (IndexOf(node, m_PaintScratch[i]) == index)
+                {
+                    RequestLane(m_PaintScratch[i]);
+                }
+            }
+        }
+
+        /// <summary>
+        /// Brings one crossing's paint into line with what the player asked for. True if it changed.
+        ///
+        /// Runs on every crossing the width pass visits, which is every crossing a re-lay has just
+        /// rebuilt. That matters because LaneSystem owns this buffer too: re-laying a junction writes
+        /// the crossing's end trims over it, or removes it, and this is what puts the hiding back.
+        ///
+        /// Showing a crossing the game laid is the one case that needs its junction handed back.
+        /// Taking the cut off also takes off the end trims the game had put in the same buffer, and
+        /// only laying the junction again works those out. It cannot loop: after the re-lay the
+        /// crossing is not hidden and not asked to be, so nothing here changes.
+        /// </summary>
+        private bool ApplyPaint(Entity lane, Entity node)
+        {
+            bool hide = false;
+
+            CrosswalkWidthSetting settings = Mod.Settings;
+
+            // Off means off, as it does for widths: nothing of the mod's is left in the city while it
+            // is switched off, and the choice comes back with it.
+            if (settings != null
+                && settings.Enabled
+                && node != Entity.Null
+                && EntityManager.Exists(node)
+                && EntityManager.HasBuffer<CrosswalkLaneOverride>(node))
+            {
+                int index = IndexOf(node, lane);
+                hide = index >= 0 && GetHidePaint(node, index);
+            }
+
+            if (!CrosswalkPaint.SetHidden(EntityManager, lane, hide))
+            {
+                return false;
+            }
+
+            NoteMarkings(node);
+
+            if (!hide && EntityManager.HasComponent<Owner>(lane))
+            {
+                RequestRelay(node);
+            }
+
+            return true;
+        }
+
+        /// <summary>
+        /// Hands one junction back to the game to be laid again, through the same cooldown the side
+        /// lines use.
+        ///
+        /// Reached only from a player's action — a crossing shown again, or the mod's data taken out —
+        /// never from anything a re-lay does, so there is no cycle for it to start.
+        /// </summary>
+        private void RequestRelay(Entity node)
+        {
+            if (node != Entity.Null)
+            {
+                m_StaleLines.Add(node);
+            }
+        }
+
+        /// <summary>Asks for this junction's side lines to be matched to its crossings shortly.</summary>
+        private void NoteMarkings(Entity node)
+        {
+            if (node != Entity.Null)
+            {
+                m_MarkingNodes[node] = m_Pass;
+            }
+        }
+
+        /// <summary>
+        /// Hides the game's side lines beside every hidden crossing, and shows them beside every one
+        /// that is not.
+        ///
+        /// A crossing's lines are separate lanes the game lays beside it, and hiding the crossing does
+        /// nothing to them. They are not laid in the same pass either: SecondaryLaneSystem runs just
+        /// after this system in Modification4B and writes through a barrier, so the lines for a
+        /// junction laid this frame do not exist until the next. Hence the two-pass wait.
+        /// </summary>
+        private void SyncMarkings()
+        {
+            if (m_MarkingNodes.Count == 0)
+            {
+                return;
+            }
+
+            m_MarkingDone.Clear();
+
+            foreach (KeyValuePair<Entity, int> entry in m_MarkingNodes)
+            {
+                if (m_Pass - entry.Value >= 2)
+                {
+                    m_MarkingDone.Add(entry.Key);
+                }
+            }
+
+            for (int i = 0; i < m_MarkingDone.Count; i++)
+            {
+                m_MarkingNodes.Remove(m_MarkingDone[i]);
+                SyncMarkingsAt(m_MarkingDone[i]);
+            }
+        }
+
+        private void SyncMarkingsAt(Entity node)
+        {
+            if (node == Entity.Null
+                || Mod.LineCatalog == null
+                || !EntityManager.Exists(node)
+                || !EntityManager.HasBuffer<Game.Net.SubLane>(node))
+            {
+                return;
+            }
+
+            m_MarkingCrossings.Clear();
+            m_MarkingLines.Clear();
+
+            // Collected first and acted on second. Hiding a line can add a buffer to it, which is a
+            // structural change, and that would invalidate the buffer being walked.
+            DynamicBuffer<Game.Net.SubLane> subLanes = EntityManager.GetBuffer<Game.Net.SubLane>(node, true);
+
+            for (int i = 0; i < subLanes.Length; i++)
+            {
+                Entity lane = subLanes[i].m_SubLane;
+
+                if (lane == Entity.Null
+                    || !EntityManager.Exists(lane)
+                    || EntityManager.HasComponent<Deleted>(lane)
+                    || !EntityManager.HasComponent<Game.Net.Curve>(lane)
+                    || !EntityManager.HasComponent<PrefabRef>(lane))
+                {
+                    continue;
+                }
+
+                if (EntityManager.HasComponent<Game.Net.SecondaryLane>(lane))
+                {
+                    // Only markings the mod could have drawn a border with. A stop line or a lane
+                    // divider is never a crossing's side line and is never to be touched.
+                    if (Mod.LineCatalog.IsCandidate(EntityManager.GetComponentData<PrefabRef>(lane).m_Prefab))
+                    {
+                        m_MarkingLines.Add(lane);
+                    }
+
+                    continue;
+                }
+
+                if (IsCrossing(lane) && EntityManager.HasComponent<NodeLane>(lane))
+                {
+                    m_MarkingCrossings.Add(lane);
+                }
+            }
+
+            for (int i = 0; i < m_MarkingLines.Count; i++)
+            {
+                Entity line = m_MarkingLines[i];
+                bool hide = false;
+
+                for (int j = 0; j < m_MarkingCrossings.Count && !hide; j++)
+                {
+                    hide = CrosswalkPaint.IsHidden(EntityManager, m_MarkingCrossings[j])
+                        && IsBeside(line, m_MarkingCrossings[j]);
+                }
+
+                CrosswalkPaint.SetHidden(EntityManager, line, hide);
+            }
+        }
+
+        /// <summary>
+        /// True if this marking is one of the two lines down this crossing's sides.
+        ///
+        /// Worked out from where SecondaryLaneSystem puts one — along the crossing, half its width out
+        /// to one side — because nothing on the marking says which lane it was laid beside. Three
+        /// tests have to pass, and the third is the one that keeps a stop line out: a border runs the
+        /// crossing's whole length, end to end, and a stop line across the carriageway stops short of
+        /// the pavement.
+        /// </summary>
+        private bool IsBeside(Entity line, Entity crossing)
+        {
+            Colossal.Mathematics.Bezier4x3 marking = EntityManager.GetComponentData<Game.Net.Curve>(line).m_Bezier;
+            Colossal.Mathematics.Bezier4x3 band = EntityManager.GetComponentData<Game.Net.Curve>(crossing).m_Bezier;
+
+            float3 along = band.d - band.a;
+            along.y = 0f;
+
+            float length = math.length(along);
+
+            if (length < 0.5f)
+            {
+                return false;
+            }
+
+            along /= length;
+
+            float3 markingAlong = marking.d - marking.a;
+            markingAlong.y = 0f;
+
+            if (math.lengthsq(markingAlong) < 0.01f
+                || math.abs(math.dot(along, math.normalize(markingAlong))) < 0.95f)
+            {
+                return false;
+            }
+
+            float width = AuthoredWidth(EntityManager.GetComponentData<PrefabRef>(crossing).m_Prefab)
+                + math.csum(EntityManager.GetComponentData<NodeLane>(crossing).m_WidthOffset) * 0.5f;
+
+            float3 start = marking.a - band.a;
+            float3 end = marking.d - band.a;
+            start.y = 0f;
+            end.y = 0f;
+
+            float3 middle = (start + end) * 0.5f;
+            float lateral = math.abs(along.x * middle.z - along.z * middle.x);
+
+            if (math.abs(lateral - width * 0.5f) > 0.4f)
+            {
+                return false;
+            }
+
+            float from = math.dot(start, along);
+            float to = math.dot(end, along);
+
+            return (math.abs(from) < 1.5f && math.abs(to - length) < 1.5f)
+                || (math.abs(to) < 1.5f && math.abs(from - length) < 1.5f);
+        }
+
+        /// <summary>
+        /// Takes the hiding off every marking in the city. Returns how many.
+        ///
+        /// For the purge and for teardown, where there is no pass to wait for. Safe to do blind: a
+        /// single cut covering a whole marking is written by nothing but this mod, so this cannot take
+        /// off anything the game put there.
+        /// </summary>
+        private int ClearCutMarkings()
+        {
+            m_MarkingNodes.Clear();
+
+            if (m_CutMarkingQuery.IsEmptyIgnoreFilter)
+            {
+                return 0;
+            }
+
+            NativeArray<Entity> lines = m_CutMarkingQuery.ToEntityArray(Allocator.Temp);
+            int cleared = 0;
+
+            try
+            {
+                for (int i = 0; i < lines.Length; i++)
+                {
+                    if (CrosswalkPaint.SetHidden(EntityManager, lines[i], false))
+                    {
+                        cleared++;
+                    }
+                }
+            }
+            finally
+            {
+                lines.Dispose();
+            }
+
+            return cleared;
         }
 
         /// <summary>
@@ -566,6 +999,7 @@ namespace CrosswalkWidth.Systems
             try
             {
                 Apply();
+                SyncMarkings();
                 RelayStaleLines();
             }
             catch (System.Exception e)
@@ -789,18 +1223,23 @@ namespace CrosswalkWidth.Systems
                 return false;
             }
 
+            // Before the widths, not after. A crossing whose prefab the catalogue does not know is
+            // left at the width the game laid it, but one the player has asked to hide is hidden
+            // whatever it is laid from.
+            bool repainted = ApplyPaint(lane, node);
+
             Entity prefab = EntityManager.GetComponentData<PrefabRef>(lane).m_Prefab;
 
             if (!TryGetWidths(prefab, out float laidWidth, out float variantWidth))
             {
-                return false;
+                return repainted;
             }
             float scale = ScaleFor(node, lane);
 
             bool widened = WriteOffset(lane, TargetWidth(laidWidth, scale) - variantWidth);
             bool moved = ApplyShift(lane, node);
 
-            return widened || moved;
+            return widened || moved || repainted;
         }
 
         /// <summary>
@@ -1758,6 +2197,10 @@ namespace CrosswalkWidth.Systems
         /// </summary>
         public void RestoreAuthoredWidths()
         {
+            // The side lines first, while the crossings beside them are still hidden. The cut on a
+            // line goes into the save just as the cut on a crossing does.
+            ClearCutMarkings();
+
             // This runs outside the per-frame pass, where the cache was last filled — possibly
             // several frames ago, and the indices it holds decide which override belongs to which
             // crossing.
@@ -1775,6 +2218,15 @@ namespace CrosswalkWidth.Systems
                     if (!IsCrossing(lane))
                     {
                         continue;
+                    }
+
+                    // Paint before width, and whatever the lane is laid from. The cut that hides a
+                    // crossing is saved with the city, so one left behind would be a crossing
+                    // nobody can see in a city with nothing left in it that knows why.
+                    if (CrosswalkPaint.SetHidden(EntityManager, lane, false)
+                        && EntityManager.HasComponent<Owner>(lane))
+                    {
+                        RequestRelay(EntityManager.GetComponentData<Owner>(lane).m_Owner);
                     }
 
                     Entity prefab = EntityManager.GetComponentData<PrefabRef>(lane).m_Prefab;

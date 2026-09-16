@@ -1157,3 +1157,93 @@ The override system's `m_AddedCrossingQuery` must not return one, or the tool of
 to select — that one is free, because the query already requires `NodeLane` and a marking lane has
 none. And the pass that lays missing lines must skip lanes that are themselves lines, since they
 carry the same two marker components.
+
+## Hiding a crossing's paint without changing the crossing
+
+The request was a crossing that works but is not drawn. Every obvious way the game has of not drawing
+a lane also changes what the lane is, or does not stay put.
+
+- **`PedestrianLaneFlags.Unsafe`** is how an unmarked crossing draws no zebra: `BatchInstanceSystem`
+  turns it into `SubMeshFlags.RequireSafe` and skips every sub-mesh carrying that. It is also what
+  *makes* a crossing unmarked — `LaneSystem` sets it exactly where it takes the signals away, and
+  citizens treat the crossing as jaywalking. Ruled out by the request itself.
+- **`Game.Tools.Hidden`** is what the renderer honours (`BatchDataSystem` copies it into
+  `CullingData.isHidden`), and nothing that simulates reads it on a lane. But
+  `Game.Net.LaneHiddenSystem`, in Modification5, removes it from any lane whose `Owner` is not hidden
+  too, every frame. Every crossing the game lays has an owner, so it would be un-hidden as fast as it
+  was hidden. (It would stick on a middle crossing, which has no owner — two mechanisms for one
+  button was not worth it.)
+- **Removing `CullingInfo`, `MeshBatch` and `MeshColor`** is how `LaneSystem` lays a lane at a hidden
+  composition — but only at the moment it creates it (`m_HideLaneTypes`, applied to a fresh entity).
+  On a lane already standing, `PreCullingSystem` holds a culling index into it and releases that
+  index only for `Deleted`. Nothing in the game removes those components from a live lane, and a mod
+  should not be the first.
+
+### `CutRange`, and why it is only paint
+
+`Game.Net.CutRange` is a buffer of curve intervals to leave undrawn. `BatchInstanceSystem` counts tile
+instances only in the gaps between them:
+
+```csharp
+if (num3 >= num2) { curve2.m_Length = curve.m_Length * (num3 - num2); if (curve2.m_Length > 0.1f) num += GetTileCount(...); }
+```
+
+so one range from 0 to 1 leaves no gap and the lane gets no instances at all.
+
+Every reader was checked. Pathfinding and creatures never touch it. The simulation systems that look
+nearby (`DirtynessSystem`, `WetnessSystem`, `FireHazardSystem`) read `Overridden`, a different
+component. `AreaConnectionSystem` only copies it onto temp previews. And `Game.Net.OverrideSystem` —
+the one other system that *writes* it, and which removes it and tags the lane `Updated` wherever it
+finds nothing overlapping, which would have been a loop — returns at the top of its job for any lane
+that is not a fence:
+
+```csharp
+if (!m_PrefabUtilityLaneData.TryGetComponent(prefabRef.m_Prefab, out var componentData) || (componentData.m_UtilityTypes & UtilityTypes.Fence) == 0) { return; }
+```
+
+### The game already writes it onto crossings
+
+`LaneSystem.CreateNodePedestrianLane` puts end trims into the same buffer — `new Bounds1(0f, x)` and
+`new Bounds1(1f - y, 1f)` — to stop a crossing's paint running into the pavement, and on every re-lay
+it replaces the buffer or removes it. Two consequences:
+
+- **Hiding has to be reapplied after every re-lay.** It is done in the width pass, which already
+  visits every crossing a re-lay rebuilds, in Modification4B after the barrier has played back.
+- **Showing a game crossing again means handing its junction back.** Taking the cut off takes the
+  trims with it, and only a re-lay works them out again. It cannot loop: after the re-lay the crossing
+  is neither hidden nor asked to be.
+
+The game's trims are one or two ranges that always leave the middle. A single range covering the whole
+curve is written by nothing but this mod, so the cut is its own record: "is this hidden" is read off
+the lane rather than remembered, and taking it off can never take off one of the game's.
+
+### It is saved, so it has to be taken off
+
+`CutRange` is `ISerializable`. A hidden crossing saved and then orphaned by removing the mod stays
+invisible until its junction happens to be re-laid. `RestoreAuthoredWidths` — which purge, reset and
+teardown all go through — takes the cut off every crossing and every marking before anything else.
+
+### The side lines are separate lanes
+
+Hiding a crossing does nothing to the lines down its sides: they are markings `SecondaryLaneSystem`
+lays beside it, and that system does not read the crossing's `CutRange`. So they are cut too.
+
+For middle crossings that is trivial — the mod lays those lines itself and knows which crossing each
+belongs to, so each line simply mirrors its crossing's cut.
+
+For the game's crossings nothing on a marking says which lane it was laid beside, so it is matched by
+where `SecondaryLaneSystem` puts one: parallel to the crossing, half the crossing's width out, and
+running its whole length end to end. The last test is what keeps a merged stop line out — it crosses
+the carriageway but stops short of the pavement. Only markings the line catalogue could have chosen
+are considered at all. **Inferred, not measured**: the tolerances (0.4 m sideways, 1.5 m at the ends)
+were set from the placement code, not from a running game.
+
+The lines for a junction laid this frame do not exist yet when the width pass runs — the marking
+system comes after it and writes through a barrier — so matching waits two passes.
+
+### Saves written by this version do not open in older ones
+
+`CrosswalkLaneOverride` goes to version 3 with the flag appended as an int, the same pattern version 2
+used. Every entry is written at the current version, hidden or not, so any city saved with this build
+that has a per-crossing setting cannot be read by 1.1.0: the serializer checks the size of what it
+reads against what was written.

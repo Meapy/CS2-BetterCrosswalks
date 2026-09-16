@@ -2114,6 +2114,10 @@ namespace CrosswalkWidth.Systems
 
                         m_Lined.Add(crossing);
                         MoveEdgeLine(line, crossing);
+
+                        // A hidden crossing's lines are hidden with it, the same way.
+                        CrosswalkPaint.SetHidden(
+                            EntityManager, line, CrosswalkPaint.IsHidden(EntityManager, crossing));
                     }
                 }
                 finally
@@ -2235,6 +2239,8 @@ namespace CrosswalkWidth.Systems
                 });
 
                 MoveEdgeLine(line, crossing);
+                CrosswalkPaint.SetHidden(
+                    EntityManager, line, CrosswalkPaint.IsHidden(EntityManager, crossing));
             }
 
             return true;
