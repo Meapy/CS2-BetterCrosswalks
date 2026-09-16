@@ -244,6 +244,7 @@ namespace CrosswalkWidth.Systems
 
             m_OverrideSystem.SetOverride(m_Selected, SelectedKey(), 0f);
             m_OverrideSystem.SetShift(m_Selected, SelectedKey(), default(float2));
+            m_OverrideSystem.SetHidePaint(m_Selected, SelectedKey(), false);
             m_OverrideSystem.RequestFullPass();
 
             Mod.Log.Info(
@@ -348,6 +349,34 @@ namespace CrosswalkWidth.Systems
             Mod.Log.Info(
                 $"{Mod.ModName}: junction {m_Selected.Index} all {m_Crossings.Count} crossings "
                 + $"set to {(int)math.round(scale * 100f)}%");
+        }
+
+        /// <summary>True if the crossing being edited is currently not drawn.</summary>
+        public bool selectedPaintHidden =>
+            m_Selected != Entity.Null
+            && m_SelectedCrossing >= 0
+            && m_OverrideSystem.GetHidePaint(m_Selected, SelectedKey());
+
+        /// <summary>
+        /// Stops drawing the crossing being edited, or starts again. Called from the toolbar panel.
+        ///
+        /// Only the paint. The crossing goes on being a crossing — people use it, its signals run,
+        /// and the rings stay on it so it can still be found, resized and moved.
+        /// </summary>
+        public void ToggleHidePaint()
+        {
+            if (m_Selected == Entity.Null || m_SelectedCrossing < 0)
+            {
+                return;
+            }
+
+            bool hide = !m_OverrideSystem.GetHidePaint(m_Selected, SelectedKey());
+
+            m_OverrideSystem.SetHidePaint(m_Selected, SelectedKey(), hide);
+
+            Mod.Log.Info(
+                $"{Mod.ModName}: junction {m_Selected.Index} crossing {selectedCrossingNumber} "
+                + (hide ? "no longer drawn" : "drawn again"));
         }
 
         /// <summary>The width in force at the crossing being edited, as a percentage.</summary>

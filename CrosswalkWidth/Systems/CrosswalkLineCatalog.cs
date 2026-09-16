@@ -127,6 +127,17 @@ namespace CrosswalkWidth.Systems
 
         public IReadOnlyList<Candidate> Candidates => m_Candidates;
 
+        /// <summary>
+        /// True if this marking prefab is one the mod might have drawn a crossing's border with.
+        ///
+        /// For telling a crossing's side line from every other marking at a junction. A stop line
+        /// or a lane divider is never one, and is never to be hidden along with a crossing.
+        /// </summary>
+        public bool IsCandidate(Entity prefab)
+        {
+            return prefab != Entity.Null && m_ByPrefab.ContainsKey(prefab);
+        }
+
         /// <summary>How many crossing lane prefabs currently carry an entry.</summary>
         public int WrittenCount => m_Written.Count;
 
