@@ -12,13 +12,15 @@ namespace CrosswalkWidth.Components
     /// keeps a modest one where it is. So the per-junction <see cref="CrosswalkOverride"/> is the
     /// default for the whole junction, and an entry here overrides it for a single crossing.
     ///
-    /// Two things can be set:
+    /// Three things can be set:
     ///
     /// - <see cref="m_Scale"/>, a multiplier on the width the game lays the crossing at.
     /// - <see cref="m_Shift"/>, how far each end has been moved along the road, in metres. Moving
     ///   both ends together slides the crossing towards or away from the junction; moving one end
     ///   alone swings it, so it runs from a different point on one kerb — a crossing set at an
     ///   angle rather than square across.
+    /// - <see cref="m_HidePaint"/>, which stops the crossing being drawn while leaving it a
+    ///   crossing in every other respect.
     ///
     /// The shift is stored with the curve it was measured from (<see cref="m_BaseStart"/> and
     /// <see cref="m_BaseEnd"/>) rather than on its own. LaneSystem rewrites a crossing's curve every
@@ -40,7 +42,7 @@ namespace CrosswalkWidth.Components
     [InternalBufferCapacity(0)]
     public struct CrosswalkLaneOverride : IBufferElementData, ISerializable
     {
-        public const int kCurrentVersion = 2;
+        public const int kCurrentVersion = 3;
 
         public int m_Version;
 
@@ -74,6 +76,17 @@ namespace CrosswalkWidth.Components
         public float2 m_AppliedShift;
 
         /// <summary>
+        /// True if the crossing is not to be drawn.
+        ///
+        /// Only the paint goes. Nothing is taken off the lane — the pedestrian graph, the signals
+        /// and the width people spread across are exactly as they were — because what hides it is
+        /// a CutRange covering the whole curve: the clip the game itself uses to stop a crossing's
+        /// paint running into the pavement, read by the renderer and by nothing that simulates.
+        /// Appended in version 3.
+        /// </summary>
+        public bool m_HidePaint;
+
+        /// <summary>
         /// True once a base curve has been recorded.
         ///
         /// Tested on the horizontal components only: a crossing at the map origin is not a thing,
@@ -84,7 +97,8 @@ namespace CrosswalkWidth.Components
 
         /// <summary>True if this entry is doing nothing and could be dropped.</summary>
         public bool IsEmpty =>
-            m_Scale <= 0f && math.abs(m_Shift.x) < 0.01f && math.abs(m_Shift.y) < 0.01f;
+            m_Scale <= 0f && math.abs(m_Shift.x) < 0.01f && math.abs(m_Shift.y) < 0.01f
+            && !m_HidePaint;
 
         public void Serialize<TWriter>(TWriter writer) where TWriter : IWriter
         {
@@ -112,6 +126,11 @@ namespace CrosswalkWidth.Components
 
             writer.Write(appliedStart);
             writer.Write(appliedEnd);
+
+            // Version 3. An int rather than a bool, so the layout on disk is as explicit as the
+            // floats before it.
+            int hidePaint = m_HidePaint ? 1 : 0;
+            writer.Write(hidePaint);
         }
 
         public void Deserialize<TReader>(TReader reader) where TReader : IReader
@@ -124,6 +143,7 @@ namespace CrosswalkWidth.Components
             m_BaseStart = default(float3);
             m_BaseEnd = default(float3);
             m_AppliedShift = default(float2);
+            m_HidePaint = false;
 
             if (m_Version < 2)
             {
@@ -145,6 +165,12 @@ namespace CrosswalkWidth.Components
             m_BaseStart = new float3(baseStartX, baseStartY, baseStartZ);
             m_BaseEnd = new float3(baseEndX, baseEndY, baseEndZ);
             m_AppliedShift = new float2(appliedStart, appliedEnd);
+
+            if (m_Version >= 3)
+            {
+                reader.Read(out int hidePaint);
+                m_HidePaint = hidePaint != 0;
+            }
         }
     }
 }

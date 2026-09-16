@@ -50,6 +50,11 @@ Because the game lays the rest with the junction and saves them with the city, a
 lines it was built with until something rebuilds it — *Apply to existing crossings and lines* is what
 brings a city you already have up to date.
 
+**Hide a crossing's paint.** *Hide crossing paint* in the tool panel stops the selected crossing
+being drawn — zebra and side lines — while leaving it a crossing in every other respect: people still
+cross there, its signals still run, and it keeps its width and position. *Show crossing paint* or
+*Reset this crossing* brings it back.
+
 ## How it works
 
 A crossing is not part of the road's cross-section. It is a **lane laid across the carriageway**:
