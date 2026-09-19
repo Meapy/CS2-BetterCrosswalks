@@ -144,6 +144,18 @@ namespace CrosswalkWidth.Systems
         private const int kMaxClearedPerUpdate = 8;
 
         /// <summary>
+        /// Frames between one look at the traffic lights and the next.
+        ///
+        /// A phase lasts seconds and TrafficLightSystem itself only runs on its own update frame,
+        /// so there is nothing to be gained from looking every frame — and a junction's whole lane
+        /// list is walked each time.
+        /// </summary>
+        private const int kSignalInterval = 4;
+
+        /// <summary>Lines one junction may write about its lights before it goes quiet.</summary>
+        private const int kMaxSignalLines = 24;
+
+        /// <summary>
         /// Path node indices for the lines, kept well clear of everything else at a junction.
         ///
         /// The game hands its own secondary lanes indices from zero, three at a time, and this
@@ -195,6 +207,23 @@ namespace CrosswalkWidth.Systems
 
         /// <summary>Middle crossings that already have their side lines, for one pass.</summary>
         private readonly HashSet<Entity> m_Lined = new HashSet<Entity>();
+
+        /// <summary>What each junction's middle crossings should show, worked out once per pass.</summary>
+        private readonly Dictionary<Entity, int> m_SignalState = new Dictionary<Entity, int>();
+
+        /// <summary>
+        /// Junctions seen to stop everything at once while their crossings are green.
+        ///
+        /// Only these are ever held at red. See UpdateSignals for why a junction has to prove it
+        /// has such a phase before this mod is allowed to make anyone wait for one.
+        /// </summary>
+        private readonly HashSet<Entity> m_PedestrianPhase = new HashSet<Entity>();
+
+        /// <summary>What was last reported about each junction's lights, so only changes are logged.</summary>
+        private readonly Dictionary<Entity, int> m_SignalSignature = new Dictionary<Entity, int>();
+
+        /// <summary>How many lines each junction has written about its lights.</summary>
+        private readonly Dictionary<Entity, int> m_SignalLines = new Dictionary<Entity, int>();
 
         /// <summary>Which lane indices are taken at the junction being laid, in the low byte only.</summary>
         private readonly bool[] m_UsedIndices = new bool[256];
@@ -618,6 +647,7 @@ namespace CrosswalkWidth.Systems
             m_PendingRemovals.Clear();
             m_LiveCount.Clear();
             m_NumbersChecked = false;
+            m_PedestrianPhase.Clear();
         }
 
         protected override void OnUpdate()
@@ -664,6 +694,12 @@ namespace CrosswalkWidth.Systems
                 // So removal is a thing the player asks for, from the settings, at a moment of their
                 // choosing: "Put every crossing back to normal" or "Remove this mod's data from the
                 // city". Both clear them. Neither happens on its own.
+                //
+                // The signals do come off, though. A crossing left standing is one people can
+                // still walk over; a crossing left standing on a red nothing will ever lift is
+                // one they would queue at for good.
+                ClearSignals();
+
                 m_Requests.Clear();
                 m_PendingRemovals.Clear();
                 return;
@@ -673,6 +709,7 @@ namespace CrosswalkWidth.Systems
             {
                 ApplyRequests();
                 Reconcile();
+                UpdateSignals();
             }
             catch (System.Exception e)
             {
@@ -2052,6 +2089,316 @@ namespace CrosswalkWidth.Systems
             }
 
             return lane;
+        }
+
+        /// <summary>
+        /// Gives the middle crossings a red light while the junction's traffic is moving.
+        ///
+        /// They do not get one from the game. Traffic lights are worked out per junction, from the
+        /// lanes in its SubLane buffer, and a middle crossing is deliberately not in one — that is
+        /// what stopped it crashing the game. So it is laid with no LaneSignal at all, and a crossing
+        /// with no signal is one nothing ever stops: citizens walk out onto it while cars have green.
+        /// Mods that reshape the phases, like Traffic Lights Enhancement, cannot help, because the
+        /// lane is not in the list they work from either.
+        ///
+        /// What makes this fixable is that the pedestrian side reads the signal off the lane itself
+        /// rather than off the junction. HumanNavigationSystem:
+        ///
+        /// <code>
+        /// m_LaneSignals.Enqueue(new HumanNavigationHelpers.LaneSignal(entity, pathElement2.m_Target, 100));
+        /// if (componentData7.m_Signal == LaneSignalType.Stop || componentData7.m_Signal == LaneSignalType.SafeStop)
+        /// {
+        ///     currentLane.m_Flags |= CreatureLaneFlags.WaitSignal;
+        /// </code>
+        ///
+        /// Anyone about to step onto a lane that has a LaneSignal waits when it says Stop, whether or
+        /// not the junction has ever heard of that lane. Nothing else in the game reads a lane signal
+        /// except through a junction's own buffer, so one put here is seen by pedestrians and by
+        /// nothing else.
+        ///
+        /// The petition in the line above is the catch, and it is why this is careful. It is written
+        /// onto this lane, and the junction only ever reads petitions from lanes in its buffer — so a
+        /// crowd waiting at a middle crossing cannot ask for a green. A red that nobody can lift is
+        /// worse than the fault being fixed: it would strand them there. So a junction is only ever
+        /// held at red once this has actually watched it stop everything with its crossings green —
+        /// an all-pedestrian phase. Until it has seen one, the crossing is left exactly as it was.
+        /// </summary>
+        private void UpdateSignals()
+        {
+            if (m_Frame % kSignalInterval != 0 || m_AddedLaneQuery.IsEmptyIgnoreFilter)
+            {
+                return;
+            }
+
+            m_SignalState.Clear();
+
+            NativeArray<Entity> lanes = m_AddedLaneQuery.ToEntityArray(Allocator.Temp);
+
+            try
+            {
+                for (int i = 0; i < lanes.Length; i++)
+                {
+                    Entity lane = lanes[i];
+
+                    if (!EntityManager.Exists(lane)
+                        || EntityManager.HasComponent<Deleted>(lane)
+                        || EntityManager.HasComponent<CrosswalkEdgeLine>(lane)
+                        || !EntityManager.HasComponent<Game.Net.PedestrianLane>(lane)
+                        || !EntityManager.HasComponent<CrosswalkJunction>(lane))
+                    {
+                        continue;
+                    }
+
+                    Entity node = EntityManager.GetComponentData<CrosswalkJunction>(lane).m_Junction;
+
+                    if (!m_SignalState.TryGetValue(node, out int state))
+                    {
+                        state = JunctionSignalState(node);
+                        m_SignalState[node] = state;
+                    }
+
+                    ApplySignal(lane, state);
+                }
+            }
+            finally
+            {
+                lanes.Dispose();
+            }
+
+            // Junctions come and go; nothing reads a stale entry, but the set would grow for the rest
+            // of the session without this.
+            if (m_PedestrianPhase.Count > 1024)
+            {
+                m_PedestrianPhase.Clear();
+            }
+        }
+
+        /// <summary>
+        /// What a junction's middle crossings should be showing: 0 no signal at all, 1 red, 2 green.
+        ///
+        /// Green means the junction has stopped everything that could run a walker over — no car or
+        /// tram lane showing Go or Yield — while its own crossings are green. That is an
+        /// all-pedestrian phase, and it is the only moment a crossing corner to corner through the
+        /// middle is safe.
+        ///
+        /// Seeing one is also what licences holding this junction at red the rest of the time. A
+        /// junction that never has one is left alone: its middle crossings behave exactly as they did
+        /// before, which is wrong, but wrong in the direction that lets people through.
+        /// </summary>
+        private int JunctionSignalState(Entity node)
+        {
+            if (node == Entity.Null
+                || !EntityManager.Exists(node)
+                || !EntityManager.HasComponent<TrafficLights>(node)
+                || !EntityManager.HasBuffer<Game.Net.SubLane>(node))
+            {
+                // No lights here at all. An unsignalled junction is one where crossing when it looks
+                // clear is the right behaviour, and the one the game gives every other crossing.
+                m_PedestrianPhase.Remove(node);
+
+                if (node != Entity.Null && EntityManager.Exists(node))
+                {
+                    ReportSignals(node, false, 0, 0, 0, 0, 0);
+                }
+
+                return 0;
+            }
+
+            bool trafficMoving = false;
+            bool crossingGreen = false;
+
+            int carLanes = 0;
+            int carGoing = 0;
+            int crossings = 0;
+            int crossingsGreen = 0;
+
+            DynamicBuffer<Game.Net.SubLane> subLanes =
+                EntityManager.GetBuffer<Game.Net.SubLane>(node, true);
+
+            for (int i = 0; i < subLanes.Length; i++)
+            {
+                Entity lane = subLanes[i].m_SubLane;
+
+                if (lane == Entity.Null
+                    || !EntityManager.Exists(lane)
+                    || !EntityManager.HasComponent<LaneSignal>(lane))
+                {
+                    continue;
+                }
+
+                LaneSignalType signal = EntityManager.GetComponentData<LaneSignal>(lane).m_Signal;
+
+                if (EntityManager.HasComponent<Game.Net.CarLane>(lane)
+                    || EntityManager.HasComponent<Game.Net.TrackLane>(lane))
+                {
+                    // Yield counts as moving. It means proceed when clear, not stop.
+                    bool going = signal == LaneSignalType.Go || signal == LaneSignalType.Yield;
+
+                    trafficMoving |= going;
+                    carLanes++;
+                    carGoing += going ? 1 : 0;
+                }
+                else if (EntityManager.HasComponent<Game.Net.PedestrianLane>(lane))
+                {
+                    bool green = signal == LaneSignalType.Go;
+
+                    crossingGreen |= green;
+                    crossings++;
+                    crossingsGreen += green ? 1 : 0;
+                }
+            }
+
+            // Crossings green as well as traffic stopped, not just traffic stopped. Every phase change
+            // passes through a moment with everything red, and treating that as a green would put
+            // people into the junction seconds before the next lot of cars set off.
+            int state;
+
+            if (!trafficMoving && crossingGreen)
+            {
+                m_PedestrianPhase.Add(node);
+                state = 2;
+            }
+            else
+            {
+                state = m_PedestrianPhase.Contains(node) ? 1 : 0;
+            }
+
+            ReportSignals(node, true, carLanes, carGoing, crossings, crossingsGreen, state);
+
+            return state;
+        }
+
+        /// <summary>
+        /// Writes what this junction's lights look like to the log, when the picture changes.
+        ///
+        /// Here because everything this decision rests on is invisible from a screenshot: whether the
+        /// junction has lights at all, whether its car lanes are actually stopped, whether its own
+        /// crossings are green at the same moment. "Still being jaywalked" is the same symptom whether
+        /// the mod is seeing no lights, seeing a junction that never stops everything, or not running.
+        ///
+        /// Only on a change, and only a couple of dozen lines per junction, which is enough for a
+        /// whole light cycle and not enough to fill a log.
+        /// </summary>
+        private void ReportSignals(
+            Entity node, bool hasLights, int carLanes, int carGoing, int crossings, int crossingsGreen, int state)
+        {
+            int signature = (hasLights ? 1 : 0)
+                | (carGoing > 0 ? 2 : 0)
+                | (crossingsGreen > 0 ? 4 : 0)
+                | (state << 3)
+                | (math.min(carLanes, 63) << 6)
+                | (math.min(crossings, 63) << 12);
+
+            if (m_SignalSignature.TryGetValue(node, out int last) && last == signature)
+            {
+                return;
+            }
+
+            m_SignalSignature[node] = signature;
+
+            m_SignalLines.TryGetValue(node, out int lines);
+
+            if (lines >= kMaxSignalLines)
+            {
+                return;
+            }
+
+            m_SignalLines[node] = lines + 1;
+
+            string verdict;
+
+            if (!hasLights)
+            {
+                verdict = "no traffic lights here, so the middle crossings are left unsignalled";
+            }
+            else if (state == 2)
+            {
+                verdict = "everything stopped and the crossings green — middle crossings GREEN";
+            }
+            else if (state == 1)
+            {
+                verdict = "middle crossings RED until the next all-pedestrian phase";
+            }
+            else
+            {
+                verdict = "this junction has not yet been seen to stop everything with its crossings "
+                    + "green, so its middle crossings are left unsignalled — give it an "
+                    + "all-pedestrian phase and they will start obeying it";
+            }
+
+            Mod.Log.Info(
+                $"{Mod.ModName}: junction {node.Index} signals — {carLanes} car/tram lanes "
+                + $"({carGoing} going), {crossings} crossings ({crossingsGreen} green): {verdict}");
+        }
+
+        /// <summary>Writes one middle crossing's signal, adding or removing it as needed.</summary>
+        private void ApplySignal(Entity lane, int state)
+        {
+            if (state == 0)
+            {
+                if (EntityManager.HasComponent<LaneSignal>(lane))
+                {
+                    EntityManager.RemoveComponent<LaneSignal>(lane);
+                }
+
+                return;
+            }
+
+            LaneSignalType wanted = state == 2 ? LaneSignalType.Go : LaneSignalType.Stop;
+
+            if (!EntityManager.HasComponent<LaneSignal>(lane))
+            {
+                EntityManager.AddComponentData(lane, new LaneSignal { m_Signal = wanted });
+                return;
+            }
+
+            LaneSignal signal = EntityManager.GetComponentData<LaneSignal>(lane);
+
+            if (signal.m_Signal != wanted)
+            {
+                // The rest of the component is left as the game found it. m_Petitioner and m_Priority
+                // are written by every walker that queues here; nothing reads them, and clearing them
+                // would be one more thing to be wrong about.
+                signal.m_Signal = wanted;
+                EntityManager.SetComponentData(lane, signal);
+            }
+        }
+
+        /// <summary>
+        /// Takes the signals back off, a few at a time.
+        ///
+        /// For the case where the feature is switched off with crossings still standing. They are
+        /// deliberately not cleared away — see the comment in OnUpdate — but a crossing left frozen on
+        /// red would be one nobody could ever cross. Without a signal it behaves as it did before.
+        /// </summary>
+        private void ClearSignals()
+        {
+            if (m_AddedLaneQuery.IsEmptyIgnoreFilter)
+            {
+                return;
+            }
+
+            NativeArray<Entity> lanes = m_AddedLaneQuery.ToEntityArray(Allocator.Temp);
+            int done = 0;
+
+            try
+            {
+                for (int i = 0; i < lanes.Length && done < kMaxClearedPerUpdate; i++)
+                {
+                    if (EntityManager.Exists(lanes[i])
+                        && EntityManager.HasComponent<LaneSignal>(lanes[i]))
+                    {
+                        EntityManager.RemoveComponent<LaneSignal>(lanes[i]);
+                        done++;
+                    }
+                }
+            }
+            finally
+            {
+                lanes.Dispose();
+            }
+
+            m_PedestrianPhase.Clear();
         }
 
         /// <summary>
