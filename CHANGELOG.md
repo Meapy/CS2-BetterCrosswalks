@@ -4,6 +4,32 @@
 kept because a good deal of it is the record of things that were got wrong first — and because the
 two save migrations in the code exist to clean up after those versions.
 
+## 1.2.1
+
+**Crossings through the middle now stop people while the traffic is moving.** They were laid with no
+traffic signal at all, because a junction works its lights out from the lanes in its own list and
+these crossings are deliberately kept out of it — which is what stopped them crashing the game. A
+crossing with no signal is one nothing ever stops, so citizens walked out in front of cars that had
+green, and mods that reshape the phases could not help because the lane is invisible to them too.
+
+The mod now drives the signal itself. A middle crossing goes green when its junction has stopped
+everything — no car or tram lane on green or yield — while its own crossings are green, which is an
+all-pedestrian phase, and is red the rest of the time.
+
+The catch, and the reason this is conservative: a citizen waiting at a middle crossing cannot ask the
+junction for a green, because the junction only listens to lanes in its own list. So a junction is
+only ever held at red once the mod has actually watched it run an all-pedestrian phase. A junction
+that never runs one — which is every junction on vanilla lights, where crossings go green alongside
+the traffic beside them — is left exactly as it was rather than having its middle crossings shut
+permanently. If you want middle crossings to behave, give the junction an all-pedestrian phase; a
+signal mod such as Traffic Lights Enhancement can add one.
+
+Which means a junction takes a light cycle or so to settle: until its all-pedestrian phase has come
+round once, its middle crossings behave as they did before. If they never start obeying, press "List
+crossings in the log" — the log now says, per junction, whether it has lights, how many of its lanes
+are moving, how many of its crossings are green, and what that junction's middle crossings are being
+shown as.
+
 ## 1.2.0
 
 **Hide a crossing's paint.** The crossing tool's panel has a new button, *Hide crossing paint*, that

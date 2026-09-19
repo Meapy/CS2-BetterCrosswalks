@@ -1247,3 +1247,75 @@ system comes after it and writes through a barrier — so matching waits two pas
 used. Every entry is written at the current version, hidden or not, so any city saved with this build
 that has a per-crossing setting cannot be read by 1.1.0: the serializer checks the size of what it
 reads against what was written.
+
+## A crossing with no signal is a crossing nobody stops
+
+Reported as "the middle crosswalks are not recognised by Traffic Lights Enhancement, so people jaywalk
+across them while cars have green". TLE is not at fault, and neither is anything about how it reads a
+junction. The crossings have no signal to read.
+
+`TrafficLightSystem` runs on the junction — the entity with `TrafficLights` — and builds its list of
+signals by walking that junction's `SubLane` buffer (`FillLaneSignals`). A middle crossing is
+deliberately not in that buffer: it has no `Owner`, which is the whole reason it stopped crashing the
+game (see "a junction's lane list is indexed by number"). So it is laid with no `LaneSignal`, and
+`PedestrianLaneFlags.Crosswalk` with no signal is exactly what the game makes at an *unsignalled*
+junction — a crossing nothing ever holds back.
+
+### The pedestrian side reads the lane, not the junction
+
+What makes it fixable is that the two halves disagree about where a signal lives.
+`HumanNavigationSystem`:
+
+```csharp
+m_LaneSignals.Enqueue(new HumanNavigationHelpers.LaneSignal(entity, pathElement2.m_Target, 100));
+if (componentData7.m_Signal == LaneSignalType.Stop || componentData7.m_Signal == LaneSignalType.SafeStop)
+{
+    currentLane.m_Flags |= CreatureLaneFlags.WaitSignal;
+```
+
+Anyone about to step onto a lane that *has* a `LaneSignal` waits when it reads `Stop`, with no
+reference to any junction. And nothing else in the game reaches a lane signal except through a
+junction's own buffer — there is no query anywhere over `LaneSignal` — so one written onto an
+unowned lane is seen by pedestrians and by nothing else at all.
+
+Only `Stop` and `SafeStop` stop them. `Yield` is not a pedestrian-side state: it reads as walk.
+
+### The petition is why this has to be conservative
+
+The first line of that snippet is the trap. A walker waiting at a crossing petitions for a green by
+writing itself onto **that lane's** signal, and `TrafficLightSystem.GetNextSignalGroup` only ever
+reads petitions from the lanes in the junction's buffer. A crowd waiting at a middle crossing is
+therefore invisible to the junction: it cannot ask for anything.
+
+So a red here is a red nobody can lift. Hold a junction at red that never runs a phase to release it
+and the crossing is not fixed, it is closed, with people queued at it for good — worse than the fault.
+
+Hence the rule: **a junction is held at red only once this mod has watched it stop everything with its
+own crossings green.** That state — no car or tram lane on `Go` or `Yield`, at least one crossing on
+`Go` — is an all-pedestrian phase, and it is the only moment a walk corner to corner through the
+middle is actually safe. A junction that has never shown one is left alone, behaving as it did
+before. Vanilla lights never do: a crossing goes green alongside the traffic running beside it. TLE's
+pedestrian phase does, which is where this comes good.
+
+Both halves of that test matter. Every phase change passes through a moment with everything red, and
+taking "traffic stopped" alone as the cue would send people into the junction a second or two before
+the next lot of cars pulled away.
+
+### Switching the feature off takes the signals with it
+
+Turning middle crossings off does not clear the crossings — that rule stands, and the reason is in
+"never tidy up on the player's behalf". But it does take the signals off them, a few per update. A
+crossing left standing is one people can still walk over; a crossing left standing on a frozen red is
+one they would queue at forever.
+
+### Proving the phase takes a cycle, and that looks exactly like the bug
+
+The first thing reported after this shipped was that the middle crossings were still being jaywalked.
+They were — for about a light cycle. Nothing can be held at red until the all-pedestrian phase has
+come round once and been seen, so a junction behaves exactly as it did before until then, which is
+indistinguishable from the fix not working at all.
+
+That is the same shape as several other traps in this file: a correct change whose evidence looks
+like a failure. So a junction now says what it sees — lights or no lights, how many car and tram
+lanes are moving, how many crossings are green, and what its middle crossings are being shown as — on
+change only, and capped per junction so a light cycle fits in the log and nothing else does.

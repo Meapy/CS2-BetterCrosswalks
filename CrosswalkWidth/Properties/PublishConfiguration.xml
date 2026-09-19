@@ -120,26 +120,33 @@ have been if the mod had never run.
 
   <ForumLink Value="https://forum.paradoxplaza.com/forum/threads/better-crosswalks.1941286/" />
 
-  <ModVersion Value="1.2.0" />
+  <ModVersion Value="1.2.1" />
   <GameVersion Value="1.6.*" />
 
-  <ChangeLog>Hide a crossing's paint.
+  <ChangeLog>Crossings through the middle now stop people while the traffic is moving.
 
-The crossing tool's panel has a new button. "Hide crossing paint" stops the crossing you have
-selected being drawn — the zebra stripes and the lines down its sides — while leaving it a crossing in
-every other respect. People still cross there, its signals still run, and it keeps the width and the
-position you gave it. The rings stay on it, so you can still find it and go on editing it.
+They were laid with no traffic signal at all. A junction works its lights out from the lanes in its
+own list, and these crossings are deliberately kept out of that list — which is what stopped them
+crashing the game — so nothing ever stopped anyone on them. Citizens walked out in front of cars that
+had green, and signal mods could not help, because the lane is invisible to them too.
 
-"Show crossing paint", or "Reset this crossing", brings it back. It works on crossings through the
-middle of a junction as well, and what you set is saved with your city.
+The mod now drives the signal itself. A crossing through the middle goes green when its junction has
+stopped everything — no car or tram lane on green or yield — while its own crossings are green, which
+is an all-pedestrian phase, and is red the rest of the time.
 
-Nothing is taken off the lane to do this. The paint is clipped away using the same cut the game
-itself uses to stop a crossing's paint running onto the pavement, which only the renderer reads — so
-the crossing the simulation sees is exactly the one it saw before.
+It is deliberately careful about this, because somebody waiting at one of these crossings cannot ask
+the junction for a green: the junction only listens to lanes in its own list. So a junction is only
+ever held at red once the mod has actually watched it run an all-pedestrian phase. That means a
+junction takes a light cycle or so to settle after you load, and a junction that never runs such a
+phase — which is every junction on the game's own lights, where a crossing goes green alongside the
+traffic beside it — is left exactly as it was rather than having its middle crossings shut for good.
 
-One thing to know before you update: this adds a field to the per-crossing settings kept in your
-save. A city saved with this version, in which any crossing has been widened, moved or hidden with
-the tool, cannot be opened again with 1.1.0 or earlier.
+So if you want crossings through the middle to behave, give the junction an all-pedestrian phase. A
+signal mod such as Traffic Lights Enhancement can add one.
+
+"List crossings in the log" now also writes out, for each junction, whether it has lights, how many
+of its lanes are moving, how many of its crossings are green, and what its middle crossings are being
+shown — which is the thing to read if they are not behaving.
   </ChangeLog>
 
   <ExternalLink Type="github" Url="https://github.com/Meapy/CS2-BetterCrosswalks" />
